@@ -1,6 +1,6 @@
 {
   "name": "cokacdir",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Norton Commander style dual-panel file manager for terminal with AI-powered natural language commands",
   "main": "dist/index.js",
   "bin": {

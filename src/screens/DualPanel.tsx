@@ -8,7 +8,6 @@ import StatusBar from '../components/StatusBar.js';
 import ConfirmDialog from '../components/ConfirmDialog.js';
 import InputDialog from '../components/InputDialog.js';
 import SearchDialog, { SearchCriteria } from '../components/SearchDialog.js';
-import AICommandModal from '../components/AICommandModal.js';
 import FileViewer from '../components/FileViewer.js';
 import FileEditor from '../components/FileEditor.js';
 import FileInfo from '../components/FileInfo.js';
@@ -18,9 +17,14 @@ import * as fileOps from '../services/fileOps.js';
 import { isValidFilename } from '../services/fileOps.js';
 import type { FileItem, PanelSide } from '../types/index.js';
 import { features } from '../utils/platform.js';
-type ModalType = 'none' | 'help' | 'mkdir' | 'delete' | 'copy' | 'move' | 'ai' | 'view' | 'edit' | 'rename' | 'search' | 'advSearch' | 'info' | 'process';
+import { APP_TITLE } from '../utils/version.js';
+type ModalType = 'none' | 'help' | 'mkdir' | 'delete' | 'copy' | 'move' | 'view' | 'edit' | 'rename' | 'search' | 'advSearch' | 'info' | 'process';
 
-export default function DualPanel() {
+interface DualPanelProps {
+  onEnterAI?: (currentPath: string) => void;
+}
+
+export default function DualPanel({ onEnterAI }: DualPanelProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const theme = defaultTheme;
@@ -390,12 +394,13 @@ export default function DualPanel() {
 
     // / - AI Command (Unix-like systems only)
     if (input === '/') {
-      if (features.ai) {
-        setModal('ai');
-      } else {
+      if (features.ai && onEnterAI) {
+        onEnterAI(currentPath);
+      } else if (!features.ai) {
         showMessage('AI command not available on this platform');
       }
     }
+
 
     // Function keys
     if (input === '1') setModal('help');
@@ -453,7 +458,7 @@ export default function DualPanel() {
       {/* Header */}
       <Box justifyContent="center" marginBottom={0}>
         <Text bold color={theme.colors.borderActive}>
-          COKACDIR v1.0.0
+          {APP_TITLE}
         </Text>
         <Text color={theme.colors.textDim}>  {features.ai ? '[/] AI  ' : ''}[Tab] Switch  [f] Find  [1-9,0] Fn</Text>
       </Box>
@@ -555,17 +560,6 @@ export default function DualPanel() {
         <SearchDialog
           onSubmit={handleAdvancedSearch}
           onCancel={() => setModal('none')}
-        />
-      )}
-
-      {/* AI Command Modal */}
-      {modal === 'ai' && (
-        <AICommandModal
-          currentPath={currentPath}
-          onClose={() => {
-            setModal('none');
-            refresh();
-          }}
         />
       )}
 

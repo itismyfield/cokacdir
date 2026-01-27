@@ -37,7 +37,6 @@ export async function executeCommand(
 ): Promise<ClaudeResponse> {
   return new Promise((resolve) => {
     let resolved = false;
-    let timedOut = false;
 
     const safeResolve = (response: ClaudeResponse) => {
       if (!resolved) {
@@ -97,12 +96,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
     });
 
     proc.on('close', (code) => {
-      clearTimeout(timeoutId);
-
-      if (timedOut) {
-        return;
-      }
-
       if (code !== 0) {
         safeResolve({
           success: false,
@@ -123,21 +116,11 @@ IMPORTANT: Format your responses using Markdown for better readability:
     });
 
     proc.on('error', (err) => {
-      clearTimeout(timeoutId);
       safeResolve({
         success: false,
         error: `Failed to start Claude: ${err.message}. Is Claude CLI installed?`,
       });
     });
-
-    const timeoutId = setTimeout(() => {
-      timedOut = true;
-      proc.kill('SIGKILL');
-      safeResolve({
-        success: false,
-        error: 'Command timed out.',
-      });
-    }, 30000);
   });
 }
 

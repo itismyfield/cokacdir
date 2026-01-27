@@ -1,14 +1,19 @@
 import React, { useState } from 'react';
-import { Box, Text, useInput, useApp } from 'ink';
+import { Box, Text, useInput } from 'ink';
 import DualPanel from './screens/DualPanel.js';
 import SystemInfo from './screens/SystemInfo.js';
 import DiskUtils from './screens/DiskUtils.js';
 import { defaultTheme } from './themes/classic-blue.js';
 import { features } from './utils/platform.js';
+import { APP_TITLE } from './utils/version.js';
 
 type Screen = 'dual-panel' | 'system-info' | 'disk-utils';
 
-export default function App() {
+interface AppProps {
+  onEnterAI?: (currentPath: string) => void;
+}
+
+export default function App({ onEnterAI }: AppProps) {
   const [currentScreen, setCurrentScreen] = useState<Screen>('dual-panel');
 
   useInput((input, key) => {
@@ -19,14 +24,18 @@ export default function App() {
   });
 
   if (currentScreen === 'dual-panel') {
-    return <DualPanel />;
+    return (
+      <DualPanel
+        onEnterAI={onEnterAI}
+      />
+    );
   }
 
   return (
     <Box flexDirection="column" padding={1}>
       <Box justifyContent="center" marginBottom={1}>
         <Text bold color={defaultTheme.colors.borderActive}>
-          COKACDIR v0.2.0
+          {APP_TITLE}
         </Text>
       </Box>
 
