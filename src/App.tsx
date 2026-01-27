@@ -6,14 +6,37 @@ import DiskUtils from './screens/DiskUtils.js';
 import { defaultTheme } from './themes/classic-blue.js';
 import { features } from './utils/platform.js';
 import { APP_TITLE } from './utils/version.js';
+import type { PanelSide } from './types/index.js';
 
 type Screen = 'dual-panel' | 'system-info' | 'disk-utils';
 
-interface AppProps {
-  onEnterAI?: (currentPath: string) => void;
+interface PanelState {
+  leftPath: string;
+  rightPath: string;
+  activePanel: PanelSide;
+  leftIndex: number;
+  rightIndex: number;
 }
 
-export default function App({ onEnterAI }: AppProps) {
+interface AppProps {
+  onEnterAI?: (currentPath: string) => void;
+  initialLeftPath?: string;
+  initialRightPath?: string;
+  initialActivePanel?: PanelSide;
+  initialLeftIndex?: number;
+  initialRightIndex?: number;
+  onSavePanelState?: (state: PanelState) => void;
+}
+
+export default function App({
+  onEnterAI,
+  initialLeftPath,
+  initialRightPath,
+  initialActivePanel,
+  initialLeftIndex,
+  initialRightIndex,
+  onSavePanelState,
+}: AppProps) {
   const [currentScreen, setCurrentScreen] = useState<Screen>('dual-panel');
 
   useInput((input, key) => {
@@ -27,6 +50,12 @@ export default function App({ onEnterAI }: AppProps) {
     return (
       <DualPanel
         onEnterAI={onEnterAI}
+        initialLeftPath={initialLeftPath}
+        initialRightPath={initialRightPath}
+        initialActivePanel={initialActivePanel}
+        initialLeftIndex={initialLeftIndex}
+        initialRightIndex={initialRightIndex}
+        onSavePanelState={onSavePanelState}
       />
     );
   }

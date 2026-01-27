@@ -1,11 +1,12 @@
 import { jsxs as _jsxs, jsx as _jsx, Fragment as _Fragment } from "react/jsx-runtime";
 import { useState, useEffect, useRef } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 import fs from 'fs';
 import path from 'path';
 import { defaultTheme } from '../themes/classic-blue.js';
 export default function FileEditor({ filePath, onClose, onSave }) {
     const theme = defaultTheme;
+    const { stdout } = useStdout();
     const [lines, setLines] = useState(['']);
     const [cursorLine, setCursorLine] = useState(0);
     const [cursorCol, setCursorCol] = useState(0);
@@ -14,7 +15,9 @@ export default function FileEditor({ filePath, onClose, onSave }) {
     const [error, setError] = useState(null);
     const [message, setMessage] = useState('');
     const messageTimerRef = useRef(null);
-    const visibleLines = 18;
+    const termHeight = stdout?.rows || 24;
+    // 터미널 높이에서 border(2) + header(1) + status bar(1) + message bar(1) 제외
+    const visibleLines = Math.max(5, termHeight - 5);
     const fileName = path.basename(filePath);
     const isNewFile = !fs.existsSync(filePath);
     useEffect(() => {

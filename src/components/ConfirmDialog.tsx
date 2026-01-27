@@ -16,6 +16,7 @@ export default function ConfirmDialog({
   onCancel,
 }: ConfirmDialogProps) {
   const theme = defaultTheme;
+  const bgColor = '#000000';
 
   useInput((input, key) => {
     if (input === 'y' || input === 'Y') {
@@ -30,19 +31,19 @@ export default function ConfirmDialog({
       flexDirection="column"
       borderStyle="double"
       borderColor={theme.colors.warning}
+      backgroundColor={bgColor}
       paddingX={2}
       paddingY={1}
-      marginX={10}
     >
       <Box justifyContent="center">
-        <Text bold color={theme.colors.warning}>{title}</Text>
+        <Text color={theme.colors.warning} bold>{title}</Text>
       </Box>
       <Text> </Text>
-      <Text>{message}</Text>
+      <Text color={theme.colors.text}>{message}</Text>
       <Text> </Text>
       <Box justifyContent="center">
         <Text color={theme.colors.success}>[Y]</Text>
-        <Text> Yes  </Text>
+        <Text> Yes    </Text>
         <Text color={theme.colors.error}>[N]</Text>
         <Text> No</Text>
       </Box>

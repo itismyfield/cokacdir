@@ -15,31 +15,54 @@ import ProcessManager from './ProcessManager.js';
 import { defaultTheme } from '../themes/classic-blue.js';
 import * as fileOps from '../services/fileOps.js';
 import { isValidFilename } from '../services/fileOps.js';
-import type { FileItem, PanelSide } from '../types/index.js';
+import type { FileItem, PanelSide, SortBy, SortOrder } from '../types/index.js';
 import { features } from '../utils/platform.js';
 import { APP_TITLE } from '../utils/version.js';
-type ModalType = 'none' | 'help' | 'mkdir' | 'delete' | 'copy' | 'move' | 'view' | 'edit' | 'rename' | 'search' | 'advSearch' | 'info' | 'process';
+import fs from 'fs';
+type ModalType = 'none' | 'help' | 'mkdir' | 'delete' | 'copy' | 'move' | 'view' | 'edit' | 'rename' | 'search' | 'advSearch' | 'info' | 'process' | 'goto';
+
+interface PanelState {
+  leftPath: string;
+  rightPath: string;
+  activePanel: PanelSide;
+  leftIndex: number;
+  rightIndex: number;
+}
 
 interface DualPanelProps {
   onEnterAI?: (currentPath: string) => void;
+  initialLeftPath?: string;
+  initialRightPath?: string;
+  initialActivePanel?: PanelSide;
+  initialLeftIndex?: number;
+  initialRightIndex?: number;
+  onSavePanelState?: (state: PanelState) => void;
 }
 
-export default function DualPanel({ onEnterAI }: DualPanelProps) {
+export default function DualPanel({
+  onEnterAI,
+  initialLeftPath,
+  initialRightPath,
+  initialActivePanel,
+  initialLeftIndex,
+  initialRightIndex,
+  onSavePanelState,
+}: DualPanelProps) {
   const { exit } = useApp();
   const { stdout } = useStdout();
   const theme = defaultTheme;
   const messageTimerRef = useRef<NodeJS.Timeout | null>(null);
 
-  // Panel paths
-  const [leftPath, setLeftPath] = useState(process.cwd());
-  const [rightPath, setRightPath] = useState(os.homedir());
+  // Panel paths (초기값은 props에서 받거나 기본값 사용)
+  const [leftPath, setLeftPath] = useState(initialLeftPath ?? process.cwd());
+  const [rightPath, setRightPath] = useState(initialRightPath ?? os.homedir());
 
   // Active panel
-  const [activePanel, setActivePanel] = useState<PanelSide>('left');
+  const [activePanel, setActivePanel] = useState<PanelSide>(initialActivePanel ?? 'left');
 
   // Selection indices
-  const [leftIndex, setLeftIndex] = useState(0);
-  const [rightIndex, setRightIndex] = useState(0);
+  const [leftIndex, setLeftIndex] = useState(initialLeftIndex ?? 0);
+  const [rightIndex, setRightIndex] = useState(initialRightIndex ?? 0);
 
   // Selected files (marked with Space)
   const [leftSelected, setLeftSelected] = useState<Set<string>>(new Set());
@@ -48,6 +71,16 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
   // File lists
   const [leftFiles, setLeftFiles] = useState<FileItem[]>([]);
   const [rightFiles, setRightFiles] = useState<FileItem[]>([]);
+
+  // 상위 폴더 이동 시 포커스할 디렉토리 이름 (좌/우 각각)
+  const [leftPendingFocus, setLeftPendingFocus] = useState<string | null>(null);
+  const [rightPendingFocus, setRightPendingFocus] = useState<string | null>(null);
+
+  // 정렬 상태 (좌/우 각각)
+  const [leftSortBy, setLeftSortBy] = useState<SortBy>('name');
+  const [leftSortOrder, setLeftSortOrder] = useState<SortOrder>('asc');
+  const [rightSortBy, setRightSortBy] = useState<SortBy>('name');
+  const [rightSortOrder, setRightSortOrder] = useState<SortOrder>('asc');
 
   // Refresh trigger
   const [refreshKey, setRefreshKey] = useState(0);
@@ -72,6 +105,11 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
   const setCurrentPath = activePanel === 'left' ? setLeftPath : setRightPath;
   const currentSelected = activePanel === 'left' ? leftSelected : rightSelected;
   const setCurrentSelected = activePanel === 'left' ? setLeftSelected : setRightSelected;
+  const setPendingFocus = activePanel === 'left' ? setLeftPendingFocus : setRightPendingFocus;
+  const currentSortBy = activePanel === 'left' ? leftSortBy : rightSortBy;
+  const setCurrentSortBy = activePanel === 'left' ? setLeftSortBy : setRightSortBy;
+  const currentSortOrder = activePanel === 'left' ? leftSortOrder : rightSortOrder;
+  const setCurrentSortOrder = activePanel === 'left' ? setLeftSortOrder : setRightSortOrder;
 
   // Get current file
   const currentFile = currentFiles[currentIndex];
@@ -97,6 +135,42 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
     setLeftSelected(new Set());
     setRightSelected(new Set());
   }, []);
+
+  // 파일 목록 로드 핸들러 (상위 이동 시 이전 폴더에 포커스)
+  const handleLeftFilesLoad = useCallback((files: FileItem[]) => {
+    setLeftFiles(files);
+    if (leftPendingFocus) {
+      const idx = files.findIndex(f => f.name === leftPendingFocus);
+      if (idx >= 0) {
+        setLeftIndex(idx);
+      }
+      setLeftPendingFocus(null);
+    }
+  }, [leftPendingFocus]);
+
+  const handleRightFilesLoad = useCallback((files: FileItem[]) => {
+    setRightFiles(files);
+    if (rightPendingFocus) {
+      const idx = files.findIndex(f => f.name === rightPendingFocus);
+      if (idx >= 0) {
+        setRightIndex(idx);
+      }
+      setRightPendingFocus(null);
+    }
+  }, [rightPendingFocus]);
+
+  // 정렬 토글 함수
+  const toggleSort = useCallback((sortType: SortBy) => {
+    if (currentSortBy === sortType) {
+      // 같은 타입이면 방향 토글
+      setCurrentSortOrder(prev => prev === 'asc' ? 'desc' : 'asc');
+    } else {
+      // 다른 타입이면 해당 타입으로 변경하고 asc로 시작
+      setCurrentSortBy(sortType);
+      setCurrentSortOrder('asc');
+    }
+    setCurrentIndex(0);
+  }, [currentSortBy, setCurrentSortBy, setCurrentSortOrder, setCurrentIndex]);
 
   // Cleanup message timer on unmount
   useEffect(() => {
@@ -317,13 +391,55 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
     setModal('none');
   };
 
+  const handleGoto = (targetPath: string) => {
+    if (!targetPath.trim()) {
+      setModal('none');
+      return;
+    }
+
+    // 경로 확장 (~ -> 홈 디렉토리)
+    let resolvedPath = targetPath.trim();
+    if (resolvedPath.startsWith('~')) {
+      resolvedPath = resolvedPath.replace('~', os.homedir());
+    }
+    // 상대 경로를 절대 경로로 변환
+    if (!path.isAbsolute(resolvedPath)) {
+      resolvedPath = path.resolve(currentPath, resolvedPath);
+    }
+
+    // 경로 유효성 검사
+    try {
+      const stat = fs.statSync(resolvedPath);
+      if (stat.isDirectory()) {
+        setCurrentPath(resolvedPath);
+        setCurrentIndex(0);
+        setCurrentSelected(new Set());
+        showMessage(`Moved to: ${resolvedPath}`);
+      } else {
+        showMessage('Error: Not a directory');
+      }
+    } catch {
+      showMessage(`Error: Path not found`);
+    }
+
+    setModal('none');
+  };
+
   useInput((input, key) => {
-    // Close modal on Escape
+    // Close modal on Escape, or go to parent directory
     if (key.escape) {
       if (modal !== 'none') {
         setModal('none');
         return;
       }
+      // Go to parent directory
+      if (currentPath !== '/') {
+        const currentDirName = path.basename(currentPath);
+        setPendingFocus(currentDirName);
+        setCurrentPath(path.dirname(currentPath));
+        setCurrentSelected(new Set());
+      }
+      return;
     }
 
     // Don't process navigation when modal is open (dialogs handle their own input)
@@ -358,11 +474,16 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
     // Enter - open directory
     if (key.return && currentFile) {
       if (currentFile.isDirectory) {
-        const newPath = currentFile.name === '..'
-          ? path.dirname(currentPath)
-          : path.join(currentPath, currentFile.name);
-        setCurrentPath(newPath);
-        setCurrentIndex(0);
+        if (currentFile.name === '..') {
+          // 상위 폴더 이동: 현재 폴더 이름 기억
+          const currentDirName = path.basename(currentPath);
+          setPendingFocus(currentDirName);
+          setCurrentPath(path.dirname(currentPath));
+        } else {
+          // 하위 폴더 이동
+          setCurrentPath(path.join(currentPath, currentFile.name));
+          setCurrentIndex(0);
+        }
         setCurrentSelected(new Set());
       }
     }
@@ -392,15 +513,44 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
       });
     }
 
-    // / - AI Command (Unix-like systems only)
-    if (input === '/') {
+    // n - sort by name (toggle asc/desc)
+    if (input === 'n' || input === 'N') {
+      toggleSort('name');
+    }
+
+    // s - sort by size (toggle asc/desc)
+    if (input === 's' || input === 'S') {
+      toggleSort('size');
+    }
+
+    // d - sort by date (toggle asc/desc)
+    if (input === 'd' || input === 'D') {
+      toggleSort('modified');
+    }
+
+    // . - AI Command (Unix-like systems only)
+    if (input === '.') {
       if (features.ai && onEnterAI) {
+        // AI 진입 전 현재 패널 상태 저장
+        if (onSavePanelState) {
+          onSavePanelState({
+            leftPath,
+            rightPath,
+            activePanel,
+            leftIndex,
+            rightIndex,
+          });
+        }
         onEnterAI(currentPath);
       } else if (!features.ai) {
         showMessage('AI command not available on this platform');
       }
     }
 
+    // / - Go to path
+    if (input === '/') {
+      setModal('goto');
+    }
 
     // Function keys
     if (input === '1') setModal('help');
@@ -453,6 +603,14 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
     ? operationFiles.join(', ')
     : `${operationFiles.slice(0, 2).join(', ')} and ${operationFiles.length - 2} more`;
 
+  // 전체 화면 모달 여부 (view, edit, info, process)
+  const isFullScreenModal = modal === 'view' || modal === 'edit' || modal === 'info' || modal === 'process';
+
+  // 오버레이 다이얼로그 여부
+  const isOverlayDialog = modal === 'help' || modal === 'copy' || modal === 'move' || modal === 'delete' ||
+                          modal === 'mkdir' || modal === 'rename' || modal === 'search' || modal === 'advSearch' ||
+                          modal === 'goto';
+
   return (
     <Box flexDirection="column" height={termHeight} key={refreshKey}>
       {/* Header */}
@@ -460,110 +618,10 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
         <Text bold color={theme.colors.borderActive}>
           {APP_TITLE}
         </Text>
-        <Text color={theme.colors.textDim}>  {features.ai ? '[/] AI  ' : ''}[Tab] Switch  [f] Find  [1-9,0] Fn</Text>
+        <Text color={theme.colors.textDim}>  {features.ai ? '[.] AI  ' : ''}[Tab] Switch  [f] Find  [1-9,0] Fn</Text>
       </Box>
 
-
-      {/* Help Modal */}
-      {modal === 'help' && (
-        <Box flexDirection="column" borderStyle="double" borderColor={theme.colors.borderActive} paddingX={2} marginX={4}>
-          <Text bold color={theme.colors.borderActive}>Help - Keyboard Shortcuts</Text>
-          <Text> </Text>
-          <Text><Text bold>Navigation:</Text></Text>
-          <Text>  ↑↓        Move cursor</Text>
-          <Text>  PgUp/PgDn Move 10 lines</Text>
-          <Text>  Home/End  Go to start/end</Text>
-          <Text>  Enter     Open directory</Text>
-          <Text>  Tab       Switch panel</Text>
-          <Text> </Text>
-          <Text><Text bold>Selection:</Text></Text>
-          <Text>  Space     Select/deselect file</Text>
-          <Text>  *         Select/deselect all</Text>
-          <Text>  f         Quick find by name</Text>
-          <Text>  F         Advanced search (size/date)</Text>
-          <Text> </Text>
-          <Text><Text bold>Functions (number keys):</Text></Text>
-          <Text>  1=Help  2=Info  3=View  4=Edit  5=Copy</Text>
-          <Text>  6=Move  7=MkDir 8=Del   {features.processManager ? '9=Proc  ' : '        '}0=Quit</Text>
-          <Text> </Text>
-          <Text><Text bold>Special:</Text></Text>
-          {features.ai && <Text>  /         AI Command (natural language)</Text>}
-          <Text>  r/R       Rename file</Text>
-          <Text> </Text>
-          <Text dimColor>Press any key to close</Text>
-        </Box>
-      )}
-
-      {/* Copy Confirm */}
-      {modal === 'copy' && (
-        <ConfirmDialog
-          title="Copy Files"
-          message={`Copy ${fileListStr} to ${targetPath}?`}
-          onConfirm={handleCopy}
-          onCancel={() => setModal('none')}
-        />
-      )}
-
-      {/* Move Confirm */}
-      {modal === 'move' && (
-        <ConfirmDialog
-          title="Move Files"
-          message={`Move ${fileListStr} to ${targetPath}?`}
-          onConfirm={handleMove}
-          onCancel={() => setModal('none')}
-        />
-      )}
-
-      {/* Delete Confirm */}
-      {modal === 'delete' && (
-        <ConfirmDialog
-          title="Delete Files"
-          message={`Delete ${fileListStr}? This cannot be undone!`}
-          onConfirm={handleDelete}
-          onCancel={() => setModal('none')}
-        />
-      )}
-
-      {/* MkDir Input */}
-      {modal === 'mkdir' && (
-        <InputDialog
-          title="Create Directory"
-          prompt="Enter directory name:"
-          onSubmit={handleMkdir}
-          onCancel={() => setModal('none')}
-        />
-      )}
-
-      {/* Rename Input */}
-      {modal === 'rename' && currentFile && (
-        <InputDialog
-          title="Rename File"
-          prompt={`Rename "${currentFile.name}" to:`}
-          defaultValue={currentFile.name}
-          onSubmit={handleRename}
-          onCancel={() => setModal('none')}
-        />
-      )}
-
-      {/* Search Input */}
-      {modal === 'search' && (
-        <InputDialog
-          title="Find File"
-          prompt="Search for:"
-          onSubmit={handleSearch}
-          onCancel={() => setModal('none')}
-        />
-      )}
-
-      {/* Advanced Search */}
-      {modal === 'advSearch' && (
-        <SearchDialog
-          onSubmit={handleAdvancedSearch}
-          onCancel={() => setModal('none')}
-        />
-      )}
-
-      {/* File Viewer */}
+      {/* Full Screen Modals */}
       {modal === 'view' && currentFile && (
         <FileViewer
           filePath={path.join(currentPath, currentFile.name)}
@@ -571,7 +629,6 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
         />
       )}
 
-      {/* File Editor */}
       {modal === 'edit' && currentFile && (
         <FileEditor
           filePath={path.join(currentPath, currentFile.name)}
@@ -580,7 +637,6 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
         />
       )}
 
-      {/* File Info */}
       {modal === 'info' && currentFile && (
         <FileInfo
           filePath={path.join(currentPath, currentFile.name)}
@@ -588,33 +644,175 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
         />
       )}
 
-      {/* Process Manager */}
       {modal === 'process' && (
         <ProcessManager onClose={() => setModal('none')} />
       )}
 
-      {/* Dual Panels */}
-      {modal === 'none' && (
-        <>
-          <Box flexGrow={1}>
+      {/* Dual Panels (always visible unless full screen modal) */}
+      {!isFullScreenModal && (
+        <Box flexDirection="column" flexGrow={1}>
+          <Box flexGrow={1} position="relative">
+            {/* Panels */}
             <Panel
               currentPath={leftPath}
-              isActive={activePanel === 'left'}
+              isActive={activePanel === 'left' && !isOverlayDialog}
               selectedIndex={leftIndex}
               selectedFiles={leftSelected}
               width={panelWidth}
               height={panelHeight}
-              onFilesLoad={setLeftFiles}
+              sortBy={leftSortBy}
+              sortOrder={leftSortOrder}
+              onFilesLoad={handleLeftFilesLoad}
             />
             <Panel
               currentPath={rightPath}
-              isActive={activePanel === 'right'}
+              isActive={activePanel === 'right' && !isOverlayDialog}
               selectedIndex={rightIndex}
               selectedFiles={rightSelected}
               width={panelWidth}
               height={panelHeight}
-              onFilesLoad={setRightFiles}
+              sortBy={rightSortBy}
+              sortOrder={rightSortOrder}
+              onFilesLoad={handleRightFilesLoad}
             />
+
+            {/* Overlay Dialogs */}
+            {isOverlayDialog && (
+              <Box
+                position="absolute"
+                flexDirection="column"
+                alignItems="center"
+                justifyContent="center"
+                width={termWidth}
+                height={panelHeight}
+              >
+                {/* Help Modal */}
+                {modal === 'help' && (
+                  <Box
+                    flexDirection="column"
+                    borderStyle="double"
+                    borderColor={theme.colors.borderActive}
+                    backgroundColor="#000000"
+                    paddingX={2}
+                    paddingY={1}
+                  >
+                    <Box justifyContent="center">
+                      <Text bold color={theme.colors.borderActive}>Help - Keyboard Shortcuts</Text>
+                    </Box>
+                    <Text> </Text>
+                    <Text bold>Navigation:</Text>
+                    <Text>  ↑↓        Move cursor</Text>
+                    <Text>  PgUp/PgDn Move 10 lines</Text>
+                    <Text>  Home/End  Go to start/end</Text>
+                    <Text>  Enter     Open directory</Text>
+                    <Text>  ESC       Go to parent dir</Text>
+                    <Text>  Tab       Switch panel</Text>
+                    <Text> </Text>
+                    <Text bold>Selection:</Text>
+                    <Text>  Space     Select/deselect file</Text>
+                    <Text>  *         Select/deselect all</Text>
+                    <Text>  f         Quick find by name</Text>
+                    <Text>  F         Advanced search</Text>
+                    <Text> </Text>
+                    <Text bold>Sorting (toggle asc/desc):</Text>
+                    <Text>  n         Sort by name</Text>
+                    <Text>  s         Sort by size</Text>
+                    <Text>  d         Sort by date</Text>
+                    <Text> </Text>
+                    <Text bold>Functions (number keys):</Text>
+                    <Text>  1=Help  2=Info  3=View  4=Edit  5=Copy</Text>
+                    <Text>  6=Move  7=MkDir 8=Del   {features.processManager ? '9=Proc  ' : '        '}0=Quit</Text>
+                    <Text> </Text>
+                    <Text bold>Special:</Text>
+                    {features.ai && <Text>  .         AI Command</Text>}
+                    <Text>  /         Go to path</Text>
+                    <Text>  r/R       Rename file</Text>
+                    <Text> </Text>
+                    <Text color={theme.colors.textDim}>Press any key to close</Text>
+                  </Box>
+                )}
+
+                {/* Copy Confirm */}
+                {modal === 'copy' && (
+                  <ConfirmDialog
+                    title="Copy Files"
+                    message={`Copy ${fileListStr} to ${targetPath}?`}
+                    onConfirm={handleCopy}
+                    onCancel={() => setModal('none')}
+                  />
+                )}
+
+                {/* Move Confirm */}
+                {modal === 'move' && (
+                  <ConfirmDialog
+                    title="Move Files"
+                    message={`Move ${fileListStr} to ${targetPath}?`}
+                    onConfirm={handleMove}
+                    onCancel={() => setModal('none')}
+                  />
+                )}
+
+                {/* Delete Confirm */}
+                {modal === 'delete' && (
+                  <ConfirmDialog
+                    title="Delete Files"
+                    message={`Delete ${fileListStr}? This cannot be undone!`}
+                    onConfirm={handleDelete}
+                    onCancel={() => setModal('none')}
+                  />
+                )}
+
+                {/* MkDir Input */}
+                {modal === 'mkdir' && (
+                  <InputDialog
+                    title="Create Directory"
+                    prompt="Enter directory name:"
+                    onSubmit={handleMkdir}
+                    onCancel={() => setModal('none')}
+                  />
+                )}
+
+                {/* Rename Input */}
+                {modal === 'rename' && currentFile && (
+                  <InputDialog
+                    title="Rename File"
+                    prompt={`Rename "${currentFile.name}" to:`}
+                    defaultValue={currentFile.name}
+                    onSubmit={handleRename}
+                    onCancel={() => setModal('none')}
+                  />
+                )}
+
+                {/* Search Input */}
+                {modal === 'search' && (
+                  <InputDialog
+                    title="Find File"
+                    prompt="Search for:"
+                    onSubmit={handleSearch}
+                    onCancel={() => setModal('none')}
+                  />
+                )}
+
+                {/* Advanced Search */}
+                {modal === 'advSearch' && (
+                  <SearchDialog
+                    onSubmit={handleAdvancedSearch}
+                    onCancel={() => setModal('none')}
+                  />
+                )}
+
+                {/* Go to Path */}
+                {modal === 'goto' && (
+                  <InputDialog
+                    title="Go to Path"
+                    prompt="Enter path:"
+                    defaultValue={currentPath}
+                    onSubmit={handleGoto}
+                    onCancel={() => setModal('none')}
+                  />
+                )}
+              </Box>
+            )}
           </Box>
 
           {/* Status Bar */}
@@ -627,7 +825,7 @@ export default function DualPanel({ onEnterAI }: DualPanelProps) {
 
           {/* Function Bar */}
           <FunctionBar message={message} width={termWidth} />
-        </>
+        </Box>
       )}
     </Box>
   );

@@ -18,9 +18,9 @@ interface SearchDialogProps {
 type SearchField = 'name' | 'minSize' | 'maxSize' | 'modifiedAfter' | 'modifiedBefore';
 
 const FIELDS: { key: SearchField; label: string; hint: string }[] = [
-  { key: 'name', label: 'Name', hint: 'Pattern to match (case-insensitive)' },
-  { key: 'minSize', label: 'Min Size', hint: 'e.g., 1024, 1K, 1M' },
-  { key: 'maxSize', label: 'Max Size', hint: 'e.g., 1024, 1K, 1M' },
+  { key: 'name', label: 'Name', hint: 'Pattern to match' },
+  { key: 'minSize', label: 'Min Size', hint: 'e.g., 1K, 1M' },
+  { key: 'maxSize', label: 'Max Size', hint: 'e.g., 1K, 1M' },
   { key: 'modifiedAfter', label: 'After', hint: 'YYYY-MM-DD' },
   { key: 'modifiedBefore', label: 'Before', hint: 'YYYY-MM-DD' },
 ];
@@ -60,6 +60,7 @@ export default function SearchDialog({ onSubmit, onCancel }: SearchDialogProps) 
     modifiedAfter: '',
     modifiedBefore: '',
   });
+  const bgColor = '#000000';
 
   useInput((input, key) => {
     if (key.escape) {
@@ -68,7 +69,6 @@ export default function SearchDialog({ onSubmit, onCancel }: SearchDialogProps) 
     }
 
     if (key.return) {
-      // Submit search
       const criteria: SearchCriteria = {
         name: values.name,
         minSize: parseSize(values.minSize),
@@ -107,34 +107,38 @@ export default function SearchDialog({ onSubmit, onCancel }: SearchDialogProps) 
       flexDirection="column"
       borderStyle="double"
       borderColor={theme.colors.borderActive}
+      backgroundColor={bgColor}
       paddingX={2}
       paddingY={1}
-      marginX={6}
     >
       <Box justifyContent="center" marginBottom={1}>
-        <Text bold color={theme.colors.borderActive}>Advanced Search</Text>
+        <Text color={theme.colors.borderActive} bold>Advanced Search</Text>
       </Box>
 
-      {FIELDS.map((field, idx) => (
-        <Box key={field.key} marginBottom={idx < FIELDS.length - 1 ? 0 : 1}>
-          <Text color={idx === activeField ? theme.colors.borderActive : theme.colors.text}>
-            {idx === activeField ? '>' : ' '} {field.label.padEnd(8)}
-          </Text>
-          <Text color={theme.colors.info}>[</Text>
-          <Text
-            color={theme.colors.text}
-            backgroundColor={idx === activeField ? theme.colors.bgSelected : undefined}
-          >
-            {(values[field.key] || '').padEnd(20)}
-          </Text>
-          <Text color={theme.colors.info}>]</Text>
-          {idx === activeField && (
-            <Text color={theme.colors.textDim}> {field.hint}</Text>
-          )}
-        </Box>
-      ))}
+      {FIELDS.map((field, idx) => {
+        const isActive = idx === activeField;
+        return (
+          <Box key={field.key}>
+            <Text color={isActive ? theme.colors.borderActive : theme.colors.text}>
+              {isActive ? '> ' : '  '}{field.label.padEnd(10)}
+            </Text>
+            <Text color={theme.colors.info}>[</Text>
+            <Text
+              color={theme.colors.text}
+              backgroundColor={isActive ? theme.colors.bgSelected : undefined}
+            >
+              {(values[field.key] || '').padEnd(12)}
+            </Text>
+            <Text color={theme.colors.info}>]</Text>
+            {isActive && (
+              <Text color={theme.colors.textDim}> {field.hint}</Text>
+            )}
+          </Box>
+        );
+      })}
 
-      <Text dimColor>
+      <Text> </Text>
+      <Text color={theme.colors.textDim}>
         [↑↓/Tab] Navigate  [Enter] Search  [Esc] Cancel
       </Text>
     </Box>

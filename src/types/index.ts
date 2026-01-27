@@ -53,6 +53,11 @@ export interface FileOperationResult {
 export type SortBy = 'name' | 'size' | 'modified';
 
 /**
+ * Sort direction
+ */
+export type SortOrder = 'asc' | 'desc';
+
+/**
  * Panel side identifier
  */
 export type PanelSide = 'left' | 'right';

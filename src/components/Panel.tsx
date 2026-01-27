@@ -4,7 +4,7 @@ import fs from 'fs';
 import path from 'path';
 import { defaultTheme } from '../themes/classic-blue.js';
 import { formatSize, formatPermissionsShort } from '../utils/format.js';
-import type { FileItem } from '../types/index.js';
+import type { FileItem, SortBy, SortOrder } from '../types/index.js';
 
 interface PanelProps {
   currentPath: string;
@@ -13,6 +13,8 @@ interface PanelProps {
   selectedFiles: Set<string>;
   width: number;
   height?: number;
+  sortBy?: SortBy;
+  sortOrder?: SortOrder;
   onFilesLoad?: (files: FileItem[]) => void;
 }
 
@@ -23,13 +25,15 @@ export default function Panel({
   selectedFiles,
   width,
   height,
+  sortBy = 'name',
+  sortOrder = 'asc',
   onFilesLoad,
 }: PanelProps) {
   const [files, setFiles] = useState<FileItem[]>([]);
   const [error, setError] = useState<string | null>(null);
   const theme = defaultTheme;
 
-  // Load files when path changes
+  // Load files when path or sort changes
   useEffect(() => {
     try {
       const entries = fs.readdirSync(currentPath, { withFileTypes: true });
@@ -55,11 +59,26 @@ export default function Panel({
         };
       });
 
-      // Sort: directories first
+      // Sort: directories first, then by sortBy/sortOrder
       fileItems.sort((a, b) => {
+        // Directories always first
         if (a.isDirectory && !b.isDirectory) return -1;
         if (!a.isDirectory && b.isDirectory) return 1;
-        return a.name.localeCompare(b.name);
+
+        let result = 0;
+        switch (sortBy) {
+          case 'name':
+            result = a.name.localeCompare(b.name);
+            break;
+          case 'size':
+            result = a.size - b.size;
+            break;
+          case 'modified':
+            result = a.modified.getTime() - b.modified.getTime();
+            break;
+        }
+
+        return sortOrder === 'desc' ? -result : result;
       });
 
       // Add parent
@@ -80,15 +99,30 @@ export default function Panel({
       setFiles([]);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [currentPath]);
+  }, [currentPath, sortBy, sortOrder]);
 
   // Calculate visible rows: height minus borders (2), header (1), column header (1), footer (1) = 5
   const visibleCount = height ? Math.max(5, height - 5) : 15;
-  const startIndex = Math.max(0, selectedIndex - Math.floor(visibleCount / 2));
+
+  // Center-locked scrolling with edge release
+  // Cursor stays centered, but moves to edges when reaching start/end of list
+  let startIndex = selectedIndex - Math.floor(visibleCount / 2);
+  // Top boundary: don't scroll above first item
+  startIndex = Math.max(0, startIndex);
+  // Bottom boundary: don't scroll past last item (no empty space at bottom)
+  startIndex = Math.min(startIndex, Math.max(0, files.length - visibleCount));
+
   const visibleFiles = files.slice(startIndex, startIndex + visibleCount);
   const displayPath = currentPath.length > width - 4
     ? '...' + currentPath.slice(-(width - 7))
     : currentPath;
+
+  // Column widths (total = width - 2 for border)
+  // Each column has 2 char padding on right
+  const innerWidth = width - 2;
+  const sizeColWidth = 8 + 2;   // 8 for content + 2 padding
+  const dateColWidth = 12 + 2;  // 12 for content + 2 padding
+  const nameColWidth = innerWidth - sizeColWidth - dateColWidth;
 
   return (
     <Box
@@ -104,15 +138,15 @@ export default function Panel({
         </Text>
       </Box>
 
-      <Box width={width - 2}>
+      <Box width={innerWidth}>
         <Text color={theme.colors.textHeader}>
-          {' Name'.padEnd(width - 24)}
+          {(sortBy === 'name' ? (sortOrder === 'asc' ? ' Name▲' : ' Name▼') : ' Name').padEnd(nameColWidth)}
         </Text>
         <Text color={theme.colors.textHeader}>
-          {'Perm'.padEnd(10)}
+          {((sortBy === 'size' ? (sortOrder === 'asc' ? 'Size▲' : 'Size▼') : 'Size').padStart(8) + '  ')}
         </Text>
         <Text color={theme.colors.textHeader}>
-          {'Size'.padStart(8)}
+          {((sortBy === 'modified' ? (sortOrder === 'asc' ? 'Modified▲' : 'Modified▼') : 'Modified').padStart(12) + '  ')}
         </Text>
       </Box>
 
@@ -123,11 +157,15 @@ export default function Panel({
           const actualIndex = startIndex + index;
           const isCursor = actualIndex === selectedIndex;
           const isMarked = selectedFiles.has(file.name);
+          const dateStr = file.name === '..' ? '' :
+            `${(file.modified.getMonth() + 1).toString().padStart(2, '0')}-${file.modified.getDate().toString().padStart(2, '0')} ${file.modified.getHours().toString().padStart(2, '0')}:${file.modified.getMinutes().toString().padStart(2, '0')}`;
+          // Name column: 2 chars for mark + icon, rest for filename
+          const nameTextWidth = nameColWidth - 2;
 
           return (
             <Box
               key={`${currentPath}-${actualIndex}-${file.name}`}
-              width={width - 2}
+              width={innerWidth}
             >
               <Text
                 color={isCursor && isActive ? theme.colors.textSelected :
@@ -138,19 +176,19 @@ export default function Panel({
               >
                 {isMarked ? '*' : ' '}
                 {file.isDirectory ? theme.chars.folder : theme.chars.file}
-                {(file.name.slice(0, width - 28) + ' '.repeat(width - 28)).slice(0, width - 28)}
+                {(file.name + ' '.repeat(nameTextWidth)).slice(0, nameTextWidth)}
               </Text>
               <Text
                 color={isCursor && isActive ? theme.colors.textSelected : theme.colors.textDim}
                 backgroundColor={isCursor && isActive ? theme.colors.bgSelected : undefined}
               >
-                {(file.permissions || '---------').padEnd(10)}
+                {(file.isDirectory ? '<DIR>' : formatSize(file.size)).padStart(8) + '  '}
               </Text>
               <Text
                 color={isCursor && isActive ? theme.colors.textSelected : theme.colors.textDim}
                 backgroundColor={isCursor && isActive ? theme.colors.bgSelected : undefined}
               >
-                {(file.isDirectory ? '<DIR>' : formatSize(file.size)).padStart(8)}
+                {dateStr.padStart(12) + '  '}
               </Text>
             </Box>
           );

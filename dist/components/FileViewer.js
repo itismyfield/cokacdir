@@ -1,11 +1,12 @@
 import { jsxs as _jsxs, jsx as _jsx, Fragment as _Fragment } from "react/jsx-runtime";
 import { useState, useEffect } from 'react';
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 import fs from 'fs';
 import path from 'path';
 import { defaultTheme } from '../themes/classic-blue.js';
 export default function FileViewer({ filePath, onClose }) {
     const theme = defaultTheme;
+    const { stdout } = useStdout();
     const [lines, setLines] = useState([]);
     const [scrollOffset, setScrollOffset] = useState(0);
     const [error, setError] = useState(null);
@@ -14,7 +15,9 @@ export default function FileViewer({ filePath, onClose }) {
     const [searchInput, setSearchInput] = useState('');
     const [matchLines, setMatchLines] = useState([]);
     const [currentMatch, setCurrentMatch] = useState(0);
-    const visibleLines = 20;
+    const termHeight = stdout?.rows || 24;
+    // 터미널 높이에서 border(2) + header(1) + status bar(1) + search bar(1) 제외
+    const visibleLines = Math.max(5, termHeight - 5);
     const fileName = path.basename(filePath);
     useEffect(() => {
         try {

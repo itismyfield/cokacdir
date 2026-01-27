@@ -7,7 +7,7 @@ import DiskUtils from './screens/DiskUtils.js';
 import { defaultTheme } from './themes/classic-blue.js';
 import { features } from './utils/platform.js';
 import { APP_TITLE } from './utils/version.js';
-export default function App({ onEnterAI }) {
+export default function App({ onEnterAI, initialLeftPath, initialRightPath, initialActivePanel, initialLeftIndex, initialRightIndex, onSavePanelState, }) {
     const [currentScreen, setCurrentScreen] = useState('dual-panel');
     useInput((input, key) => {
         // ESC from sub-screens
@@ -16,7 +16,7 @@ export default function App({ onEnterAI }) {
         }
     });
     if (currentScreen === 'dual-panel') {
-        return (_jsx(DualPanel, { onEnterAI: onEnterAI }));
+        return (_jsx(DualPanel, { onEnterAI: onEnterAI, initialLeftPath: initialLeftPath, initialRightPath: initialRightPath, initialActivePanel: initialActivePanel, initialLeftIndex: initialLeftIndex, initialRightIndex: initialRightIndex, onSavePanelState: onSavePanelState }));
     }
     return (_jsxs(Box, { flexDirection: "column", padding: 1, children: [_jsx(Box, { justifyContent: "center", marginBottom: 1, children: _jsx(Text, { bold: true, color: defaultTheme.colors.borderActive, children: APP_TITLE }) }), currentScreen === 'system-info' && _jsx(SystemInfo, {}), currentScreen === 'disk-utils' && features.diskUtils && _jsx(DiskUtils, {}), currentScreen === 'disk-utils' && !features.diskUtils && (_jsx(Box, { flexDirection: "column", children: _jsx(Text, { color: "yellow", children: "Disk Utilities is not available on this platform." }) })), _jsx(Box, { marginTop: 1, children: _jsx(Text, { dimColor: true, children: "Press ESC to return to file manager" }) })] }));
 }
