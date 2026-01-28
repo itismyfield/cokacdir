@@ -84,6 +84,8 @@ pub enum DialogType {
     Rename,
     Search,
     Goto,
+    LargeImageConfirm,
+    TrueColorWarning,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -321,6 +323,9 @@ pub struct App {
     // Image viewer state
     pub image_viewer_state: Option<crate::ui::image_viewer::ImageViewerState>,
 
+    // Pending large image path (for confirmation dialog)
+    pub pending_large_image: Option<std::path::PathBuf>,
+
     // Search result state (재귀 검색 결과)
     pub search_result_state: crate::ui::search_result::SearchResultState,
 
@@ -375,6 +380,7 @@ impl App {
             system_info_state: crate::ui::system_info::SystemInfoState::default(),
             advanced_search_state: crate::ui::advanced_search::AdvancedSearchState::default(),
             image_viewer_state: None,
+            pending_large_image: None,
             search_result_state: crate::ui::search_result::SearchResultState::default(),
             previous_screen: None,
         }
@@ -611,6 +617,39 @@ impl App {
 
                 // Check if it's an image file
                 if crate::ui::image_viewer::is_image_file(&path) {
+                    // Check true color support first
+                    if !crate::ui::image_viewer::supports_true_color() {
+                        self.pending_large_image = Some(path);
+                        self.dialog = Some(Dialog {
+                            dialog_type: DialogType::TrueColorWarning,
+                            input: String::new(),
+                            message: "Terminal doesn't support true color. Open anyway?".to_string(),
+                            completion: None,
+                            selected_button: 1, // Default to "No"
+                        });
+                        return;
+                    }
+
+                    // Check file size (threshold: 10MB)
+                    const LARGE_IMAGE_THRESHOLD: u64 = 10 * 1024 * 1024;
+                    let file_size = std::fs::metadata(&path)
+                        .map(|m| m.len())
+                        .unwrap_or(0);
+
+                    if file_size > LARGE_IMAGE_THRESHOLD {
+                        // Show confirmation dialog for large image
+                        let size_mb = file_size as f64 / (1024.0 * 1024.0);
+                        self.pending_large_image = Some(path);
+                        self.dialog = Some(Dialog {
+                            dialog_type: DialogType::LargeImageConfirm,
+                            input: String::new(),
+                            message: format!("This image is {:.1}MB. Open anyway?", size_mb),
+                            completion: None,
+                            selected_button: 1, // Default to "No"
+                        });
+                        return;
+                    }
+
                     self.image_viewer_state = Some(
                         crate::ui::image_viewer::ImageViewerState::new(&path)
                     );
@@ -921,6 +960,15 @@ impl App {
             self.show_message(&format!("Deleted {}/{}. Error: {}", success_count, files.len(), last_error));
         }
         self.refresh_panels();
+    }
+
+    pub fn execute_open_large_image(&mut self) {
+        if let Some(path) = self.pending_large_image.take() {
+            self.image_viewer_state = Some(
+                crate::ui::image_viewer::ImageViewerState::new(&path)
+            );
+            self.current_screen = Screen::ImageViewer;
+        }
     }
 
     pub fn execute_mkdir(&mut self, name: &str) {

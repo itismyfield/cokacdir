@@ -1,5 +1,5 @@
 use crossterm::event::KeyCode;
-use image::{GenericImageView, DynamicImage, Pixel};
+use image::{GenericImageView, DynamicImage};
 use ratatui::{
     layout::Rect,
     style::{Color, Style},
@@ -10,6 +10,46 @@ use ratatui::{
 use std::path::Path;
 
 use super::{app::{App, Screen}, theme::Theme};
+
+/// Check if terminal supports true color (24-bit RGB)
+pub fn supports_true_color() -> bool {
+    // Check TERM_PROGRAM for known terminals
+    if let Ok(term_program) = std::env::var("TERM_PROGRAM") {
+        match term_program.as_str() {
+            "Apple_Terminal" => return false,
+            "iTerm.app" | "WezTerm" | "Hyper" | "vscode" | "Tabby" | "Alacritty" => return true,
+            _ => {}
+        }
+    }
+
+    // iTerm2 sets this
+    if std::env::var("ITERM_SESSION_ID").is_ok() {
+        return true;
+    }
+
+    // iTerm2 also sets LC_TERMINAL
+    if let Ok(lc_term) = std::env::var("LC_TERMINAL") {
+        if lc_term == "iTerm2" {
+            return true;
+        }
+    }
+
+    // Windows Terminal
+    if std::env::var("WT_SESSION").is_ok() {
+        return true;
+    }
+
+    // COLORTERM is the most reliable indicator
+    if let Ok(colorterm) = std::env::var("COLORTERM") {
+        if colorterm == "truecolor" || colorterm == "24bit" {
+            return true;
+        }
+    }
+
+    // If none of the above, assume no true color support
+    // This is conservative but safer
+    false
+}
 
 pub struct ImageViewerState {
     pub path: std::path::PathBuf,
@@ -144,83 +184,73 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) {
 }
 
 fn render_image(frame: &mut Frame, img: &DynamicImage, area: Rect, zoom: f32, offset_x: i32, offset_y: i32) {
-    // Each terminal cell can show 2 vertical pixels using half-block characters
     let term_width = area.width as u32;
-    let term_height = (area.height.saturating_sub(1)) as u32 * 2; // -1 for help line, *2 for half-blocks
+    let term_height = area.height.saturating_sub(1) as u32;
+    let pixel_height = term_height * 2;
 
     let img_width = img.width();
     let img_height = img.height();
 
-    // Calculate scaled dimensions
-    let scale_x = (term_width as f32 / img_width as f32) * zoom;
-    let scale_y = (term_height as f32 / img_height as f32) * zoom;
-    let scale = scale_x.min(scale_y);
+    // Calculate scale to fit image in terminal area
+    let scale_x = term_width as f32 / img_width as f32;
+    let scale_y = pixel_height as f32 / img_height as f32;
+    let base_scale = scale_x.min(scale_y);
+    let scale = base_scale * zoom;
 
-    let scaled_width = (img_width as f32 * scale) as u32;
-    let scaled_height = (img_height as f32 * scale) as u32;
+    let scaled_width = ((img_width as f32 * scale) as u32).max(1);
+    let scaled_height = ((img_height as f32 * scale) as u32).max(1);
 
-    // Center the image
-    let start_x = ((term_width as i32 - scaled_width as i32) / 2 + offset_x).max(0) as u32;
-    let start_y = ((term_height as i32 - scaled_height as i32) / 2 + offset_y).max(0) as u32;
-
-    // Resize image for display
+    // Resize image and convert to RGB8
     let resized = img.resize_exact(
-        scaled_width.max(1),
-        scaled_height.max(1),
+        scaled_width,
+        scaled_height,
         image::imageops::FilterType::Triangle,
-    );
+    ).to_rgb8();
+
+    // Calculate offset for centering (in pixels)
+    let center_offset_x = (term_width as i32 - scaled_width as i32) / 2;
+    let center_offset_y = (pixel_height as i32 - scaled_height as i32) / 2;
+
+    // Apply user pan offset
+    let view_offset_x = center_offset_x + offset_x;
+    let view_offset_y = center_offset_y + offset_y;
 
     let mut lines: Vec<Line> = Vec::new();
 
-    // Process 2 rows at a time for half-block rendering
-    for row in 0..((area.height.saturating_sub(1)) as u32) {
+    for term_row in 0..term_height {
         let mut spans: Vec<Span> = Vec::new();
 
-        for col in 0..term_width {
-            let img_x = col.saturating_sub(start_x);
-            let img_y_top = (row * 2).saturating_sub(start_y / 2 * 2);
-            let img_y_bottom = img_y_top + 1;
+        let pixel_row_top = (term_row * 2) as i32;
+        let pixel_row_bottom = (term_row * 2 + 1) as i32;
 
-            let (top_color, bottom_color) = if col >= start_x
-                && col < start_x + scaled_width
-                && row * 2 >= start_y
-                && row * 2 < start_y + scaled_height
+        for term_col in 0..term_width {
+            let img_x = term_col as i32 - view_offset_x;
+            let img_y_top = pixel_row_top - view_offset_y;
+            let img_y_bottom = pixel_row_bottom - view_offset_y;
+
+            let top_color = if img_x >= 0 && img_x < scaled_width as i32
+                && img_y_top >= 0 && img_y_top < scaled_height as i32
             {
-                let top = if img_y_top < resized.height() && img_x < resized.width() {
-                    let pixel = resized.get_pixel(img_x, img_y_top);
-                    let rgb = pixel.to_rgb();
-                    Some(Color::Rgb(rgb[0], rgb[1], rgb[2]))
-                } else {
-                    None
-                };
-
-                let bottom = if img_y_bottom < resized.height() && img_x < resized.width() {
-                    let pixel = resized.get_pixel(img_x, img_y_bottom);
-                    let rgb = pixel.to_rgb();
-                    Some(Color::Rgb(rgb[0], rgb[1], rgb[2]))
-                } else {
-                    None
-                };
-
-                (top, bottom)
+                let rgb = resized.get_pixel(img_x as u32, img_y_top as u32);
+                Some(Color::Rgb(rgb[0], rgb[1], rgb[2]))
             } else {
-                (None, None)
+                None
+            };
+
+            let bottom_color = if img_x >= 0 && img_x < scaled_width as i32
+                && img_y_bottom >= 0 && img_y_bottom < scaled_height as i32
+            {
+                let rgb = resized.get_pixel(img_x as u32, img_y_bottom as u32);
+                Some(Color::Rgb(rgb[0], rgb[1], rgb[2]))
+            } else {
+                None
             };
 
             let (ch, style) = match (top_color, bottom_color) {
-                (Some(top), Some(bottom)) => {
-                    // Use half-block: foreground = top, background = bottom
-                    ('▀', Style::default().fg(top).bg(bottom))
-                }
-                (Some(top), None) => {
-                    ('▀', Style::default().fg(top))
-                }
-                (None, Some(bottom)) => {
-                    ('▄', Style::default().fg(bottom))
-                }
-                (None, None) => {
-                    (' ', Style::default())
-                }
+                (Some(top), Some(bottom)) => ('▀', Style::default().fg(top).bg(bottom)),
+                (Some(top), None) => ('▀', Style::default().fg(top)),
+                (None, Some(bottom)) => ('▄', Style::default().fg(bottom)),
+                (None, None) => (' ', Style::default()),
             };
 
             spans.push(Span::styled(ch.to_string(), style));
@@ -229,7 +259,10 @@ fn render_image(frame: &mut Frame, img: &DynamicImage, area: Rect, zoom: f32, of
         lines.push(Line::from(spans));
     }
 
-    frame.render_widget(Paragraph::new(lines), Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1)));
+    frame.render_widget(
+        Paragraph::new(lines),
+        Rect::new(area.x, area.y, area.width, term_height as u16),
+    );
 }
 
 pub fn handle_input(app: &mut App, code: KeyCode) {

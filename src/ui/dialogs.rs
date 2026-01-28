@@ -208,7 +208,7 @@ pub fn draw_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Theme
 
     // 다이얼로그 타입별 크기 설정
     let (width, height) = match dialog.dialog_type {
-        DialogType::Delete => (50u16, 6u16),
+        DialogType::Delete | DialogType::LargeImageConfirm | DialogType::TrueColorWarning => (50u16, 6u16),
         DialogType::Copy | DialogType::Move => {
             let w = area.width.saturating_sub(6).max(60);
             (w, 7 + completion_height)
@@ -230,7 +230,13 @@ pub fn draw_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Theme
 
     match dialog.dialog_type {
         DialogType::Delete => {
-            draw_confirm_dialog(frame, dialog, dialog_area, theme);
+            draw_confirm_dialog(frame, dialog, dialog_area, theme, " Delete ");
+        }
+        DialogType::LargeImageConfirm => {
+            draw_confirm_dialog(frame, dialog, dialog_area, theme, " Large Image ");
+        }
+        DialogType::TrueColorWarning => {
+            draw_confirm_dialog(frame, dialog, dialog_area, theme, " True Color ");
         }
         DialogType::Copy | DialogType::Move => {
             draw_copy_move_dialog(frame, dialog, dialog_area, theme);
@@ -285,9 +291,9 @@ fn draw_simple_input_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, them
     frame.render_widget(Paragraph::new(input_line), input_area);
 }
 
-fn draw_confirm_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Theme) {
+fn draw_confirm_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Theme, title: &str) {
     let block = Block::default()
-        .title(" Delete ")
+        .title(title)
         .title_style(theme.header_style())
         .borders(Borders::ALL)
         .border_style(theme.border_style(true));
@@ -767,6 +773,31 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
                             app.execute_delete();
                         } else {
                             app.dialog = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            DialogType::LargeImageConfirm | DialogType::TrueColorWarning => {
+                match code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        app.dialog = None;
+                        app.execute_open_large_image();
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        app.dialog = None;
+                        app.pending_large_image = None;
+                    }
+                    KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                        dialog.selected_button = 1 - dialog.selected_button;
+                    }
+                    KeyCode::Enter => {
+                        if dialog.selected_button == 0 {
+                            app.dialog = None;
+                            app.execute_open_large_image();
+                        } else {
+                            app.dialog = None;
+                            app.pending_large_image = None;
                         }
                     }
                     _ => {}
