@@ -399,6 +399,31 @@ fn handle_dual_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
         return ui::dialogs::handle_dialog_input(app, code, modifiers);
     }
 
+    // Handle Ctrl key combinations first
+    if modifiers.contains(KeyModifiers::CONTROL) {
+        match code {
+            // Clipboard operations
+            KeyCode::Char('c') => {
+                app.clipboard_copy();
+                return false;
+            }
+            KeyCode::Char('x') => {
+                app.clipboard_cut();
+                return false;
+            }
+            KeyCode::Char('v') => {
+                app.clipboard_paste();
+                return false;
+            }
+            // AI screen - Ctrl+A
+            KeyCode::Char('a') => {
+                app.show_ai_screen();
+                return false;
+            }
+            _ => {}
+        }
+    }
+
     match code {
         // Quit
         KeyCode::Char('0') | KeyCode::Char('q') | KeyCode::Char('Q') => return true,
@@ -454,9 +479,8 @@ fn handle_dual_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
             }
         }
 
-        // AI screen - '.' or Ctrl+A
+        // AI screen - '.'
         KeyCode::Char('.') => app.show_ai_screen(),
-        KeyCode::Char('a') if modifiers.contains(KeyModifiers::CONTROL) => app.show_ai_screen(),
 
         // System info - 'i' or 'I'
         KeyCode::Char('i') | KeyCode::Char('I') => app.show_system_info(),

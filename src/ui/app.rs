@@ -88,6 +88,21 @@ pub enum DialogType {
     TrueColorWarning,
 }
 
+/// Clipboard operation type for Ctrl+C/X/V operations
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardOperation {
+    Copy,
+    Cut,
+}
+
+/// Clipboard state for storing files to copy/move
+#[derive(Debug, Clone)]
+pub struct Clipboard {
+    pub files: Vec<String>,
+    pub source_path: PathBuf,
+    pub operation: ClipboardOperation,
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct PathCompletion {
     pub suggestions: Vec<String>,  // 자동완성 후보 목록
@@ -331,6 +346,9 @@ pub struct App {
 
     // Track previous screen for back navigation
     pub previous_screen: Option<Screen>,
+
+    // Clipboard state for Ctrl+C/X/V operations
+    pub clipboard: Option<Clipboard>,
 }
 
 impl App {
@@ -383,6 +401,7 @@ impl App {
             pending_large_image: None,
             search_result_state: crate::ui::search_result::SearchResultState::default(),
             previous_screen: None,
+            clipboard: None,
         }
     }
 
@@ -545,7 +564,7 @@ impl App {
 
     pub fn show_message(&mut self, msg: &str) {
         self.message = Some(msg.to_string());
-        self.message_timer = 30; // ~3 seconds at 10 FPS
+        self.message_timer = 10; // ~1 second at 10 FPS
     }
 
     pub fn refresh_panels(&mut self) {
@@ -960,6 +979,151 @@ impl App {
             self.show_message(&format!("Deleted {}/{}. Error: {}", success_count, files.len(), last_error));
         }
         self.refresh_panels();
+    }
+
+    // ========== Clipboard operations (Ctrl+C/X/V) ==========
+
+    /// Copy selected files to clipboard (Ctrl+C)
+    pub fn clipboard_copy(&mut self) {
+        let files = self.get_operation_files();
+        if files.is_empty() {
+            self.show_message("No files selected");
+            return;
+        }
+
+        let source_path = self.active_panel().path.clone();
+        let count = files.len();
+
+        self.clipboard = Some(Clipboard {
+            files,
+            source_path,
+            operation: ClipboardOperation::Copy,
+        });
+
+        self.show_message(&format!("{} file(s) copied to clipboard", count));
+    }
+
+    /// Cut selected files to clipboard (Ctrl+X)
+    pub fn clipboard_cut(&mut self) {
+        let files = self.get_operation_files();
+        if files.is_empty() {
+            self.show_message("No files selected");
+            return;
+        }
+
+        let source_path = self.active_panel().path.clone();
+        let count = files.len();
+
+        self.clipboard = Some(Clipboard {
+            files,
+            source_path,
+            operation: ClipboardOperation::Cut,
+        });
+
+        self.show_message(&format!("{} file(s) cut to clipboard", count));
+    }
+
+    /// Paste files from clipboard to current panel (Ctrl+V)
+    pub fn clipboard_paste(&mut self) {
+        let clipboard = match self.clipboard.take() {
+            Some(cb) => cb,
+            None => {
+                self.show_message("Clipboard is empty");
+                return;
+            }
+        };
+
+        let target_path = self.active_panel().path.clone();
+
+        // Check if source and target are the same (use canonical paths for robustness)
+        let is_same_folder = match (clipboard.source_path.canonicalize(), target_path.canonicalize()) {
+            (Ok(src), Ok(dest)) => src == dest,
+            _ => clipboard.source_path == target_path, // Fallback to direct comparison
+        };
+
+        if is_same_folder {
+            self.clipboard = Some(clipboard);
+            self.show_message("Source and target are the same folder");
+            return;
+        }
+
+        // Verify source path still exists
+        if !clipboard.source_path.exists() {
+            self.show_message("Source folder no longer exists");
+            return; // Don't restore clipboard - source is gone
+        }
+
+        // Verify target is a valid directory
+        if !target_path.is_dir() {
+            self.clipboard = Some(clipboard);
+            self.show_message("Target is not a valid directory");
+            return;
+        }
+
+        let mut success_count = 0;
+        let mut last_error = String::new();
+        let total = clipboard.files.len();
+
+        // Get canonical target path for cycle detection
+        let canonical_target = target_path.canonicalize().ok();
+
+        for file_name in &clipboard.files {
+            let src = clipboard.source_path.join(file_name);
+            let dest = target_path.join(file_name);
+
+            // Check for copying/moving directory into itself
+            if let (Some(ref target_canon), Ok(src_canon)) = (&canonical_target, src.canonicalize()) {
+                if src.is_dir() && target_canon.starts_with(&src_canon) {
+                    last_error = format!("Cannot copy '{}' into itself", file_name);
+                    continue;
+                }
+            }
+
+            let result = match clipboard.operation {
+                ClipboardOperation::Copy => file_ops::copy_file(&src, &dest),
+                ClipboardOperation::Cut => file_ops::move_file(&src, &dest),
+            };
+
+            match result {
+                Ok(_) => success_count += 1,
+                Err(e) => last_error = e.to_string(),
+            }
+        }
+
+        let op_name = match clipboard.operation {
+            ClipboardOperation::Copy => "Copied",
+            ClipboardOperation::Cut => "Moved",
+        };
+
+        if success_count == total {
+            self.show_message(&format!("{} {} file(s)", op_name, success_count));
+        } else {
+            self.show_message(&format!("{} {}/{}. Error: {}", op_name, success_count, total, last_error));
+        }
+
+        // Keep clipboard for copy operations (can paste multiple times)
+        // Clear clipboard for cut operations (files are moved)
+        if clipboard.operation == ClipboardOperation::Copy {
+            self.clipboard = Some(clipboard);
+        }
+
+        self.refresh_panels();
+    }
+
+    /// Check if clipboard has content
+    pub fn has_clipboard(&self) -> bool {
+        self.clipboard.is_some()
+    }
+
+    /// Get clipboard info for status display
+    pub fn clipboard_info(&self) -> Option<(usize, &str)> {
+        self.clipboard.as_ref().map(|cb| {
+            let op = match cb.operation {
+                ClipboardOperation::Copy => "copy",
+                ClipboardOperation::Cut => "cut",
+            };
+            (cb.files.len(), op)
+        })
     }
 
     pub fn execute_open_large_image(&mut self) {
@@ -1510,5 +1674,216 @@ mod tests {
         assert_eq!(DialogType::Copy, DialogType::Copy);
         assert_eq!(DialogType::Delete, DialogType::Delete);
         assert_ne!(DialogType::Copy, DialogType::Move);
+    }
+
+    // ========== Clipboard tests ==========
+
+    #[test]
+    fn test_clipboard_copy() {
+        let temp_dir = create_temp_dir();
+        fs::write(temp_dir.join("file1.txt"), "content").unwrap();
+
+        let mut app = App::new(temp_dir.clone(), temp_dir.clone());
+
+        // Move past ".." if present
+        if app.active_panel().files.first().map(|f| f.name.as_str()) == Some("..") {
+            app.move_cursor(1);
+        }
+
+        // Copy to clipboard
+        app.clipboard_copy();
+
+        assert!(app.clipboard.is_some());
+        let clipboard = app.clipboard.as_ref().unwrap();
+        assert_eq!(clipboard.operation, ClipboardOperation::Copy);
+        assert_eq!(clipboard.files.len(), 1);
+        assert_eq!(clipboard.source_path, temp_dir);
+
+        cleanup_temp_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_clipboard_cut() {
+        let temp_dir = create_temp_dir();
+        fs::write(temp_dir.join("file1.txt"), "content").unwrap();
+
+        let mut app = App::new(temp_dir.clone(), temp_dir.clone());
+
+        // Move past ".."
+        if app.active_panel().files.first().map(|f| f.name.as_str()) == Some("..") {
+            app.move_cursor(1);
+        }
+
+        // Cut to clipboard
+        app.clipboard_cut();
+
+        assert!(app.clipboard.is_some());
+        let clipboard = app.clipboard.as_ref().unwrap();
+        assert_eq!(clipboard.operation, ClipboardOperation::Cut);
+        assert_eq!(clipboard.files.len(), 1);
+
+        cleanup_temp_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_clipboard_paste_copy() {
+        let temp_dir = create_temp_dir();
+        let src_dir = temp_dir.join("src");
+        let dest_dir = temp_dir.join("dest");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        fs::write(src_dir.join("file.txt"), "content").unwrap();
+
+        let mut app = App::new(src_dir.clone(), dest_dir.clone());
+
+        // Move past ".."
+        if app.active_panel().files.first().map(|f| f.name.as_str()) == Some("..") {
+            app.move_cursor(1);
+        }
+
+        // Copy to clipboard
+        app.clipboard_copy();
+
+        // Switch to right panel (dest)
+        app.switch_panel();
+
+        // Paste
+        app.clipboard_paste();
+
+        // File should exist in both locations
+        assert!(src_dir.join("file.txt").exists());
+        assert!(dest_dir.join("file.txt").exists());
+
+        // Clipboard should still exist (copy can be pasted multiple times)
+        assert!(app.clipboard.is_some());
+
+        cleanup_temp_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_clipboard_paste_cut() {
+        let temp_dir = create_temp_dir();
+        let src_dir = temp_dir.join("src");
+        let dest_dir = temp_dir.join("dest");
+        fs::create_dir_all(&src_dir).unwrap();
+        fs::create_dir_all(&dest_dir).unwrap();
+        fs::write(src_dir.join("file.txt"), "content").unwrap();
+
+        let mut app = App::new(src_dir.clone(), dest_dir.clone());
+
+        // Move past ".."
+        if app.active_panel().files.first().map(|f| f.name.as_str()) == Some("..") {
+            app.move_cursor(1);
+        }
+
+        // Cut to clipboard
+        app.clipboard_cut();
+
+        // Switch to right panel (dest)
+        app.switch_panel();
+
+        // Paste
+        app.clipboard_paste();
+
+        // File should only exist in destination
+        assert!(!src_dir.join("file.txt").exists());
+        assert!(dest_dir.join("file.txt").exists());
+
+        // Clipboard should be cleared (cut can only be pasted once)
+        assert!(app.clipboard.is_none());
+
+        cleanup_temp_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_clipboard_paste_same_folder_rejected() {
+        let temp_dir = create_temp_dir();
+        fs::write(temp_dir.join("file.txt"), "content").unwrap();
+
+        let mut app = App::new(temp_dir.clone(), temp_dir.clone());
+
+        // Move past ".."
+        if app.active_panel().files.first().map(|f| f.name.as_str()) == Some("..") {
+            app.move_cursor(1);
+        }
+
+        // Copy to clipboard
+        app.clipboard_copy();
+
+        // Try to paste to the same folder
+        app.clipboard_paste();
+
+        // Clipboard should still exist (paste was rejected)
+        assert!(app.clipboard.is_some());
+
+        cleanup_temp_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_clipboard_empty_rejected() {
+        let temp_dir = create_temp_dir();
+        let mut app = App::new(temp_dir.clone(), temp_dir.clone());
+
+        // Clipboard is empty
+        assert!(app.clipboard.is_none());
+
+        // Try to paste
+        app.clipboard_paste();
+
+        // Should show message but not crash
+        assert!(app.message.is_some());
+
+        cleanup_temp_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_has_clipboard() {
+        let temp_dir = create_temp_dir();
+        fs::write(temp_dir.join("file.txt"), "content").unwrap();
+
+        let mut app = App::new(temp_dir.clone(), temp_dir.clone());
+
+        assert!(!app.has_clipboard());
+
+        // Move past ".."
+        if app.active_panel().files.first().map(|f| f.name.as_str()) == Some("..") {
+            app.move_cursor(1);
+        }
+
+        app.clipboard_copy();
+        assert!(app.has_clipboard());
+
+        cleanup_temp_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_clipboard_info() {
+        let temp_dir = create_temp_dir();
+        fs::write(temp_dir.join("file.txt"), "content").unwrap();
+
+        let mut app = App::new(temp_dir.clone(), temp_dir.clone());
+
+        assert!(app.clipboard_info().is_none());
+
+        // Move past ".."
+        if app.active_panel().files.first().map(|f| f.name.as_str()) == Some("..") {
+            app.move_cursor(1);
+        }
+
+        app.clipboard_copy();
+        let info = app.clipboard_info();
+        assert!(info.is_some());
+        let (count, op) = info.unwrap();
+        assert_eq!(count, 1);
+        assert_eq!(op, "copy");
+
+        cleanup_temp_dir(&temp_dir);
+    }
+
+    #[test]
+    fn test_clipboard_operation_equality() {
+        assert_eq!(ClipboardOperation::Copy, ClipboardOperation::Copy);
+        assert_eq!(ClipboardOperation::Cut, ClipboardOperation::Cut);
+        assert_ne!(ClipboardOperation::Copy, ClipboardOperation::Cut);
     }
 }
