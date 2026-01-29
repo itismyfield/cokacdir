@@ -100,6 +100,9 @@ impl ViewerState {
         }
     }
 
+    /// Maximum file size for viewing (100MB)
+    const MAX_FILE_SIZE: u64 = 100 * 1024 * 1024;
+
     /// 파일 로드
     pub fn load_file(&mut self, path: &PathBuf) -> Result<(), String> {
         self.file_path = path.clone();
@@ -109,6 +112,16 @@ impl ViewerState {
         self.search_term.clear();
         self.match_lines.clear();
         self.match_positions.clear();
+
+        // Check file size before loading to prevent memory exhaustion
+        let metadata = std::fs::metadata(path).map_err(|e| e.to_string())?;
+        if metadata.len() > Self::MAX_FILE_SIZE {
+            return Err(format!(
+                "File too large ({:.1} MB). Maximum size is {} MB.",
+                metadata.len() as f64 / 1024.0 / 1024.0,
+                Self::MAX_FILE_SIZE / 1024 / 1024
+            ));
+        }
 
         // 파일 읽기
         let bytes = std::fs::read(path).map_err(|e| e.to_string())?;

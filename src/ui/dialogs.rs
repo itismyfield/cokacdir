@@ -76,6 +76,7 @@ fn parse_path_for_completion(input: &str) -> (PathBuf, String) {
 
 /// 디렉토리 읽기 및 접두어 매칭
 /// 대소문자 무시 검색, 디렉토리 우선 정렬
+/// Security: Filters out . and .. entries to prevent path traversal
 fn get_path_suggestions(base_dir: &PathBuf, prefix: &str) -> Vec<String> {
     let mut suggestions: Vec<(String, bool)> = Vec::new();
     let lower_prefix = prefix.to_lowercase();
@@ -83,6 +84,12 @@ fn get_path_suggestions(base_dir: &PathBuf, prefix: &str) -> Vec<String> {
     if let Ok(entries) = fs::read_dir(base_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
             let name = entry.file_name().to_string_lossy().to_string();
+
+            // Security: Skip . and .. entries to prevent path traversal
+            if name == "." || name == ".." {
+                continue;
+            }
+
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
             // 접두어 매칭 (대소문자 무시)

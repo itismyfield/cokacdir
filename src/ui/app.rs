@@ -1067,6 +1067,43 @@ impl App {
     }
 
     pub fn execute_goto(&mut self, path_str: &str) {
+        // Security: Check for path traversal attempts
+        if path_str.contains("..") {
+            // Normalize the path to resolve .. components
+            let normalized = if path_str.starts_with('~') {
+                dirs::home_dir()
+                    .map(|h| h.join(path_str[1..].trim_start_matches('/')))
+                    .unwrap_or_else(|| PathBuf::from(path_str))
+            } else if PathBuf::from(path_str).is_absolute() {
+                PathBuf::from(path_str)
+            } else {
+                self.active_panel().path.join(path_str)
+            };
+
+            // Canonicalize to resolve all .. components
+            match normalized.canonicalize() {
+                Ok(canonical) => {
+                    let fallback = self.active_panel().path.clone();
+                    let valid_path = get_valid_path(&canonical, &fallback);
+                    if valid_path != fallback {
+                        let panel = self.active_panel_mut();
+                        panel.path = valid_path.clone();
+                        panel.selected_index = 0;
+                        panel.selected_files.clear();
+                        panel.load_files();
+                        self.show_message(&format!("Moved to: {}", valid_path.display()));
+                    } else {
+                        self.show_message("Error: Path not found or not accessible");
+                    }
+                    return;
+                }
+                Err(_) => {
+                    self.show_message("Error: Invalid path");
+                    return;
+                }
+            }
+        }
+
         let path = if path_str.starts_with('~') {
             dirs::home_dir()
                 .map(|h| h.join(path_str[1..].trim_start_matches('/')))

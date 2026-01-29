@@ -293,7 +293,7 @@ fn get_spinner_frame() -> char {
     const SPINNER_FRAMES: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
     let frame_idx = (std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .unwrap_or_default()
         .as_millis() / 100) as usize % SPINNER_FRAMES.len();
     SPINNER_FRAMES[frame_idx]
 }

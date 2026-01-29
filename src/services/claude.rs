@@ -18,8 +18,9 @@ fn session_id_regex() -> &'static Regex {
 }
 
 /// Validate session ID format (alphanumeric, dashes, underscores only)
+/// Max length reduced to 64 characters for security
 fn is_valid_session_id(session_id: &str) -> bool {
-    !session_id.is_empty() && session_id.len() < 256 && session_id_regex().is_match(session_id)
+    !session_id.is_empty() && session_id.len() <= 64 && session_id_regex().is_match(session_id)
 }
 
 /// Execute a command using Claude CLI
@@ -30,11 +31,18 @@ pub fn execute_command(
 ) -> ClaudeResponse {
     let mut args = vec![
         "-p".to_string(),
-        "--dangerously-skip-permissions".to_string(),
         "--output-format".to_string(),
         "json".to_string(),
         "--append-system-prompt".to_string(),
-        r#"You are a terminal file manager assistant. Be concise. Focus on file operations. Suggest safe commands only. Respond in the same language as the user.
+        r#"You are a terminal file manager assistant. Be concise. Focus on file operations. Respond in the same language as the user.
+
+SECURITY RULES (MUST FOLLOW):
+- NEVER execute destructive commands like rm -rf, format, mkfs, dd, etc.
+- NEVER modify system files in /etc, /sys, /proc, /boot
+- NEVER access or modify files outside the current working directory without explicit user path
+- NEVER execute commands that could harm the system or compromise security
+- ONLY suggest safe file operations: copy, move, rename, create directory, view, edit
+- If a request seems dangerous, explain the risk and suggest a safer alternative
 
 IMPORTANT: Format your responses using Markdown for better readability:
 - Use **bold** for important terms or commands

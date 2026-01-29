@@ -191,8 +191,23 @@ impl EditorState {
         }
     }
 
+    /// Maximum file size for editing (50MB - more restrictive than viewer)
+    const MAX_EDIT_FILE_SIZE: u64 = 50 * 1024 * 1024;
+
     /// 파일 로드
     pub fn load_file(&mut self, path: &PathBuf) -> Result<(), String> {
+        // Check file size before loading to prevent memory exhaustion
+        if path.exists() {
+            let metadata = fs::metadata(path).map_err(|e| e.to_string())?;
+            if metadata.len() > Self::MAX_EDIT_FILE_SIZE {
+                return Err(format!(
+                    "File too large for editing ({:.1} MB). Maximum size is {} MB. Use the viewer instead.",
+                    metadata.len() as f64 / 1024.0 / 1024.0,
+                    Self::MAX_EDIT_FILE_SIZE / 1024 / 1024
+                ));
+            }
+        }
+
         self.file_path = path.clone();
         self.cursor_line = 0;
         self.cursor_col = 0;

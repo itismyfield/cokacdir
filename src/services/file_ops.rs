@@ -82,6 +82,22 @@ fn copy_dir_recursive_inner(
             #[cfg(unix)]
             {
                 let link_target = fs::read_link(&src_path)?;
+
+                // Security: Validate symlink target
+                // Reject absolute symlinks pointing to sensitive system paths
+                if link_target.is_absolute() {
+                    let target_str = link_target.to_string_lossy();
+                    let sensitive_paths = ["/etc", "/sys", "/proc", "/boot", "/root", "/var/log"];
+                    for sensitive in sensitive_paths {
+                        if target_str.starts_with(sensitive) {
+                            return Err(io::Error::new(
+                                io::ErrorKind::PermissionDenied,
+                                format!("Cannot copy symlink pointing to sensitive path: {}", target_str),
+                            ));
+                        }
+                    }
+                }
+
                 std::os::unix::fs::symlink(&link_target, &dest_path)?;
             }
             #[cfg(not(unix))]
@@ -139,8 +155,27 @@ pub fn move_file(src: &Path, dest: &Path) -> io::Result<()> {
     }
 }
 
+/// Protected system paths that should never be deleted
+const PROTECTED_PATHS: &[&str] = &[
+    "/", "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
+    "/opt", "/proc", "/root", "/sbin", "/sys", "/tmp", "/usr", "/var",
+];
+
 /// Delete a file or directory
 pub fn delete_file(path: &Path) -> io::Result<()> {
+    // Security: Prevent deletion of protected system paths
+    if let Ok(canonical) = path.canonicalize() {
+        let path_str = canonical.to_string_lossy();
+        for protected in PROTECTED_PATHS {
+            if path_str == *protected {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    format!("Cannot delete protected system path: {}", protected),
+                ));
+            }
+        }
+    }
+
     let metadata = fs::symlink_metadata(path)?;
 
     if metadata.is_symlink() {
@@ -177,6 +212,9 @@ pub fn rename_file(old_path: &Path, new_path: &Path) -> io::Result<()> {
     fs::rename(old_path, new_path)
 }
 
+/// Maximum filename length (POSIX limit)
+const MAX_FILENAME_LENGTH: usize = 255;
+
 /// Validate filename for dangerous characters
 pub fn is_valid_filename(name: &str) -> Result<(), &'static str> {
     if name.is_empty() || name.trim().is_empty() {
@@ -196,6 +234,26 @@ pub fn is_valid_filename(name: &str) -> Result<(), &'static str> {
     // Check for reserved names
     if name == "." || name == ".." {
         return Err("Invalid filename");
+    }
+
+    // Check length limit
+    if name.len() > MAX_FILENAME_LENGTH {
+        return Err("Filename too long (max 255 characters)");
+    }
+
+    // Check for control characters
+    if name.chars().any(|c| c.is_control()) {
+        return Err("Filename cannot contain control characters");
+    }
+
+    // Check for leading/trailing whitespace
+    if name != name.trim() {
+        return Err("Filename cannot start or end with whitespace");
+    }
+
+    // Check for leading hyphen (could be interpreted as option)
+    if name.starts_with('-') {
+        return Err("Filename cannot start with hyphen");
     }
 
     Ok(())
