@@ -261,6 +261,7 @@ pub struct PathCompletion {
 pub struct Dialog {
     pub dialog_type: DialogType,
     pub input: String,
+    pub cursor_pos: usize,  // 커서 위치 (문자 인덱스)
     pub message: String,
     pub completion: Option<PathCompletion>,  // 경로 자동완성용
     pub selected_button: usize,  // 버튼 선택 인덱스 (0: Yes, 1: No)
@@ -797,6 +798,7 @@ impl App {
                         self.dialog = Some(Dialog {
                             dialog_type: DialogType::TrueColorWarning,
                             input: String::new(),
+                            cursor_pos: 0,
                             message: "Terminal doesn't support true color. Open anyway?".to_string(),
                             completion: None,
                             selected_button: 1, // Default to "No"
@@ -817,6 +819,7 @@ impl App {
                         self.dialog = Some(Dialog {
                             dialog_type: DialogType::LargeImageConfirm,
                             input: String::new(),
+                            cursor_pos: 0,
                             message: format!("This image is {:.1}MB. Open anyway?", size_mb),
                             completion: None,
                             selected_button: 1, // Default to "No"
@@ -883,9 +886,11 @@ impl App {
             format!("{} and {} more", files[..2].join(", "), files.len() - 2)
         };
         let target = format!("{}/", self.target_panel().path.display());
+        let cursor_pos = target.chars().count();
         self.dialog = Some(Dialog {
             dialog_type: DialogType::Copy,
             input: target,
+            cursor_pos,
             message: file_list.clone(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
@@ -904,9 +909,11 @@ impl App {
             format!("{} and {} more", files[..2].join(", "), files.len() - 2)
         };
         let target = format!("{}/", self.target_panel().path.display());
+        let cursor_pos = target.chars().count();
         self.dialog = Some(Dialog {
             dialog_type: DialogType::Move,
             input: target,
+            cursor_pos,
             message: file_list.clone(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
@@ -927,6 +934,7 @@ impl App {
         self.dialog = Some(Dialog {
             dialog_type: DialogType::Delete,
             input: String::new(),
+            cursor_pos: 0,
             message: format!("Delete {}?", file_list),
             completion: None,
             selected_button: 1,  // 기본값: No (안전을 위해)
@@ -937,6 +945,7 @@ impl App {
         self.dialog = Some(Dialog {
             dialog_type: DialogType::Mkdir,
             input: String::new(),
+            cursor_pos: 0,
             message: String::new(),
             completion: None,
             selected_button: 0,
@@ -947,9 +956,11 @@ impl App {
         let panel = self.active_panel();
         if let Some(file) = panel.current_file() {
             if file.name != ".." {
+                let cursor_pos = file.name.chars().count();
                 self.dialog = Some(Dialog {
                     dialog_type: DialogType::Rename,
                     input: file.name.clone(),
+                    cursor_pos,
                     message: String::new(),
                     completion: None,
                     selected_button: 0,
@@ -964,6 +975,7 @@ impl App {
         self.dialog = Some(Dialog {
             dialog_type: DialogType::Search,
             input: String::new(),
+            cursor_pos: 0,
             message: "Search for:".to_string(),
             completion: None,
             selected_button: 0,
@@ -972,9 +984,11 @@ impl App {
 
     pub fn show_goto_dialog(&mut self) {
         let current_path = self.active_panel().path.display().to_string();
+        let cursor_pos = current_path.chars().count();
         self.dialog = Some(Dialog {
             dialog_type: DialogType::Goto,
             input: current_path,
+            cursor_pos,
             message: "Go to path:".to_string(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
@@ -1124,6 +1138,7 @@ impl App {
         self.dialog = Some(Dialog {
             dialog_type: DialogType::Progress,
             input: String::new(),
+            cursor_pos: 0,
             message: String::new(),
             completion: None,
             selected_button: 0,
@@ -1201,6 +1216,7 @@ impl App {
         self.dialog = Some(Dialog {
             dialog_type: DialogType::Progress,
             input: String::new(),
+            cursor_pos: 0,
             message: String::new(),
             completion: None,
             selected_button: 0,
@@ -1380,6 +1396,7 @@ impl App {
         self.dialog = Some(Dialog {
             dialog_type: DialogType::DuplicateConflict,
             input: String::new(),
+            cursor_pos: 0,
             message: String::new(),
             completion: None,
             selected_button: 0,
@@ -1441,6 +1458,7 @@ impl App {
         self.dialog = Some(Dialog {
             dialog_type: DialogType::Progress,
             input: String::new(),
+            cursor_pos: 0,
             message: String::new(),
             completion: None,
             selected_button: 0,
@@ -1551,6 +1569,7 @@ impl App {
         self.dialog = Some(Dialog {
             dialog_type: DialogType::Progress,
             input: String::new(),
+            cursor_pos: 0,
             message: String::new(),
             completion: None,
             selected_button: 0,

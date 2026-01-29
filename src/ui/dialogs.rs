@@ -63,6 +63,22 @@ fn parse_path_for_completion(input: &str) -> (PathBuf, String) {
         return (path, String::new());
     }
 
+    // Special handling: "/." 로 끝나면 (but not "/..") "."를 prefix로 처리
+    // PathBuf::file_name()은 "."를 None으로 반환하므로 수동 처리 필요
+    if expanded.ends_with("/.") && !expanded.ends_with("/..") {
+        let parent_str = &expanded[..expanded.len() - 2]; // "/." 제거
+        let parent_path = if parent_str.is_empty() {
+            PathBuf::from("/")
+        } else {
+            PathBuf::from(parent_str)
+        };
+        return (parent_path, ".".to_string());
+    }
+    // 단독 "." 입력
+    if expanded == "." {
+        return (PathBuf::from("."), ".".to_string());
+    }
+
     // 파일명 부분과 디렉토리 부분 분리
     if let Some(parent) = path.parent() {
         let prefix = path
@@ -76,7 +92,24 @@ fn parse_path_for_completion(input: &str) -> (PathBuf, String) {
     }
 }
 
-/// 디렉토리 읽기 및 접두어 매칭
+/// 순차 매칭 (subsequence matching)
+/// pattern의 문자들이 text에 순서대로 존재하는지 확인 (연속일 필요 없음)
+/// 예: "lade"는 "cLAuDE"에 매칭 (l-a-d-e 순서로 존재)
+fn matches_subsequence(text: &str, pattern: &str) -> bool {
+    let mut pattern_chars = pattern.chars().peekable();
+    for text_char in text.chars() {
+        if let Some(&pattern_char) = pattern_chars.peek() {
+            if text_char == pattern_char {
+                pattern_chars.next();
+            }
+        } else {
+            break;
+        }
+    }
+    pattern_chars.peek().is_none()
+}
+
+/// 디렉토리 읽기 및 순차 매칭
 /// 대소문자 무시 검색, 디렉토리 우선 정렬
 /// Security: Filters out . and .. entries to prevent path traversal
 fn get_path_suggestions(base_dir: &PathBuf, prefix: &str) -> Vec<String> {
@@ -94,8 +127,8 @@ fn get_path_suggestions(base_dir: &PathBuf, prefix: &str) -> Vec<String> {
 
             let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
 
-            // 접두어 매칭 (대소문자 무시)
-            if prefix.is_empty() || name.to_lowercase().starts_with(&lower_prefix) {
+            // 순차 매칭 (대소문자 무시)
+            if prefix.is_empty() || matches_subsequence(&name.to_lowercase(), &lower_prefix) {
                 let display_name = if is_dir {
                     format!("{}/", name)
                 } else {
@@ -201,6 +234,7 @@ fn apply_completion(dialog: &mut Dialog, base_dir: &Path, suggestion: &str) {
     }
 
     dialog.input = path_str;
+    dialog.cursor_pos = dialog.input.chars().count();
 }
 
 pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, theme: &Theme) {
@@ -290,18 +324,54 @@ fn draw_simple_input_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, them
     // 입력 필드만 표시 (중앙 정렬)
     let max_input_width = (inner.width - 4) as usize;
     let input_chars: Vec<char> = dialog.input.chars().collect();
-    let display_input = if input_chars.len() > max_input_width {
-        let skip = input_chars.len().saturating_sub(max_input_width.saturating_sub(3));
-        let suffix: String = input_chars[skip..].iter().collect();
-        format!("...{}", suffix)
+    let cursor_pos = dialog.cursor_pos.min(input_chars.len());
+
+    // 스크롤 처리: 커서가 보이도록 표시 범위 계산
+    let (display_chars, display_cursor_pos) = if input_chars.len() > max_input_width {
+        // 커서가 보이도록 스크롤 범위 계산
+        let visible_width = max_input_width.saturating_sub(3); // "..." 제외
+        let scroll_start = if cursor_pos < visible_width {
+            0
+        } else {
+            cursor_pos.saturating_sub(visible_width) + 1
+        };
+        let scroll_end = (scroll_start + visible_width).min(input_chars.len());
+        let chars: Vec<char> = input_chars[scroll_start..scroll_end].to_vec();
+        let adj_cursor = cursor_pos.saturating_sub(scroll_start);
+        if scroll_start > 0 {
+            let mut prefix_chars = vec!['.', '.', '.'];
+            prefix_chars.extend(chars);
+            (prefix_chars, adj_cursor + 3)
+        } else {
+            (chars, adj_cursor)
+        }
     } else {
-        dialog.input.clone()
+        (input_chars.clone(), cursor_pos)
     };
+
+    // 커서 위치에 따라 텍스트 분할
+    let before_cursor: String = display_chars[..display_cursor_pos].iter().collect();
+    let cursor_char = if display_cursor_pos < display_chars.len() {
+        display_chars[display_cursor_pos].to_string()
+    } else {
+        " ".to_string() // 커서가 끝에 있으면 공백 표시
+    };
+    let after_cursor: String = if display_cursor_pos < display_chars.len() {
+        display_chars[display_cursor_pos + 1..].iter().collect()
+    } else {
+        String::new()
+    };
+
+    let cursor_style = Style::default()
+        .fg(theme.bg)
+        .bg(theme.border_active)
+        .add_modifier(Modifier::SLOW_BLINK);
 
     let input_line = Line::from(vec![
         Span::styled("> ", Style::default().fg(theme.info)),
-        Span::styled(display_input, theme.normal_style()),
-        Span::styled("_", Style::default().fg(theme.border_active).add_modifier(Modifier::SLOW_BLINK)),
+        Span::styled(before_cursor, theme.normal_style()),
+        Span::styled(cursor_char, cursor_style),
+        Span::styled(after_cursor, theme.normal_style()),
     ]);
 
     // 수직 중앙에 배치
@@ -415,44 +485,77 @@ fn draw_copy_move_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: 
     let max_input_width = (inner.width - 4) as usize;
     let preview_chars: Vec<char> = preview_suffix.chars().collect();
     let total_len = input_chars.len() + preview_chars.len();
+    let cursor_pos = dialog.cursor_pos.min(input_chars.len());
 
-    let (display_input, display_preview, display_prefix_start) = if total_len > max_input_width {
+    let (display_chars, display_preview, display_prefix_start, display_cursor_pos) = if total_len > max_input_width {
         let available = max_input_width.saturating_sub(3);
         if preview_chars.len() >= available {
             let preview_display: String = preview_chars[..available].iter().collect();
-            (String::from("..."), preview_display, 3)
+            (vec!['.', '.', '.'], preview_display, 3usize, 3usize)
         } else {
             let input_available = available - preview_chars.len();
             let skip = input_chars.len().saturating_sub(input_available);
-            let input_display: String = input_chars[skip..].iter().collect();
+            let input_display: Vec<char> = input_chars[skip..].to_vec();
             let prefix_pos = if prefix_char_start >= skip {
                 3 + (prefix_char_start - skip)
             } else {
                 3
             };
-            (format!("...{}", input_display), preview_suffix.clone(), prefix_pos)
+            let adj_cursor = if cursor_pos >= skip { 3 + cursor_pos - skip } else { 3 };
+            let mut display = vec!['.', '.', '.'];
+            display.extend(input_display);
+            (display, preview_suffix.clone(), prefix_pos, adj_cursor)
         }
     } else {
-        (dialog.input.clone(), preview_suffix.clone(), prefix_char_start)
+        (input_chars.clone(), preview_suffix.clone(), prefix_char_start, cursor_pos)
     };
+
+    // 커서 위치에 따라 텍스트 분할
+    let before_cursor: String = display_chars[..display_cursor_pos].iter().collect();
+    let cursor_char = if display_cursor_pos < display_chars.len() {
+        display_chars[display_cursor_pos].to_string()
+    } else {
+        if !display_preview.is_empty() {
+            display_preview.chars().next().unwrap().to_string()
+        } else {
+            " ".to_string()
+        }
+    };
+    let after_cursor: String = if display_cursor_pos < display_chars.len() {
+        display_chars[display_cursor_pos + 1..].iter().collect()
+    } else {
+        String::new()
+    };
+    let display_preview_after = if display_cursor_pos >= display_chars.len() && !display_preview.is_empty() {
+        display_preview.chars().skip(1).collect()
+    } else {
+        display_preview.clone()
+    };
+
+    let cursor_style = Style::default()
+        .fg(theme.bg)
+        .bg(theme.border_active)
+        .add_modifier(Modifier::SLOW_BLINK);
 
     let input_line = Line::from(vec![
         Span::styled("> ", Style::default().fg(theme.info)),
-        Span::styled(display_input, theme.normal_style()),
-        Span::styled(&display_preview, theme.dim_style()),
-        Span::styled("_", Style::default().fg(theme.border_active).add_modifier(Modifier::SLOW_BLINK)),
+        Span::styled(before_cursor, theme.normal_style()),
+        Span::styled(cursor_char, cursor_style),
+        Span::styled(after_cursor, theme.normal_style()),
+        Span::styled(&display_preview_after, theme.dim_style()),
     ]);
     let input_area = Rect::new(inner.x + 1, inner.y + 2, inner.width - 2, 1);
     frame.render_widget(Paragraph::new(input_line), input_area);
 
     // 자동완성 목록 (입력창 아래 한 칸 여백)
     let list_start_y = inner.y + 4;
-    let list_x = if is_root_path {
+    // 루트 경로일 때는 "/" 위치에 맞추기 위해 1 감소 (단, prefix가 있을 때만)
+    let list_x = if is_root_path && display_prefix_start > 0 {
         inner.x + 1 + 2 + display_prefix_start as u16 - 1
     } else {
         inner.x + 1 + 2 + display_prefix_start as u16
     };
-    let list_width = if is_root_path {
+    let list_width = if is_root_path && display_prefix_start > 0 {
         inner.width.saturating_sub(2 + display_prefix_start as u16)
     } else {
         inner.width.saturating_sub(3 + display_prefix_start as u16)
@@ -594,37 +697,71 @@ fn draw_goto_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Them
     let max_input_width = (inner.width - 4) as usize;
     let preview_chars: Vec<char> = preview_suffix.chars().collect();
     let total_len = input_chars.len() + preview_chars.len();
+    let cursor_pos = dialog.cursor_pos.min(input_chars.len());
 
-    let (display_input, display_preview, display_prefix_start) = if total_len > max_input_width {
+    let (display_chars, display_preview, display_prefix_start, display_cursor_pos) = if total_len > max_input_width {
         // 앞부분을 ...로 생략하고 뒷부분(미리보기 포함) 표시
         let available = max_input_width.saturating_sub(3); // "..." 제외한 공간
 
         if preview_chars.len() >= available {
             // 미리보기만으로도 공간 초과 - 미리보기만 잘라서 표시
             let preview_display: String = preview_chars[..available].iter().collect();
-            (String::from("..."), preview_display, 3)
+            (vec!['.', '.', '.'], preview_display, 3usize, 3usize)
         } else {
             // 입력 일부 + 미리보기 전체 표시
             let input_available = available - preview_chars.len();
             let skip = input_chars.len().saturating_sub(input_available);
-            let input_display: String = input_chars[skip..].iter().collect();
+            let input_display: Vec<char> = input_chars[skip..].to_vec();
             let prefix_pos = if prefix_char_start >= skip {
                 3 + (prefix_char_start - skip)
             } else {
                 3
             };
-            (format!("...{}", input_display), preview_suffix.clone(), prefix_pos)
+            let adj_cursor = if cursor_pos >= skip { 3 + cursor_pos - skip } else { 3 };
+            let mut display = vec!['.', '.', '.'];
+            display.extend(input_display);
+            (display, preview_suffix.clone(), prefix_pos, adj_cursor)
         }
     } else {
-        (dialog.input.clone(), preview_suffix.clone(), prefix_char_start)
+        (input_chars.clone(), preview_suffix.clone(), prefix_char_start, cursor_pos)
     };
+
+    // 커서 위치에 따라 텍스트 분할
+    let before_cursor: String = display_chars[..display_cursor_pos].iter().collect();
+    let cursor_char = if display_cursor_pos < display_chars.len() {
+        display_chars[display_cursor_pos].to_string()
+    } else {
+        // 커서가 입력 끝에 있을 때 미리보기 첫 문자 또는 공백
+        if !display_preview.is_empty() {
+            display_preview.chars().next().unwrap().to_string()
+        } else {
+            " ".to_string()
+        }
+    };
+    let after_cursor: String = if display_cursor_pos < display_chars.len() {
+        display_chars[display_cursor_pos + 1..].iter().collect()
+    } else {
+        String::new()
+    };
+    // 미리보기 텍스트 (커서가 끝에 있으면 첫 글자 제외)
+    let display_preview_after = if display_cursor_pos >= display_chars.len() && !display_preview.is_empty() {
+        display_preview.chars().skip(1).collect()
+    } else {
+        display_preview.clone()
+    };
+
+    let cursor_style = Style::default()
+        .fg(theme.bg)
+        .bg(theme.border_active)
+        .add_modifier(Modifier::SLOW_BLINK);
 
     // 입력 필드 렌더링 (선택된 항목 미리보기 포함)
     let input_line = Line::from(vec![
         Span::styled("> ", Style::default().fg(theme.info)),
-        Span::styled(display_input, theme.normal_style()),
-        Span::styled(&display_preview, theme.dim_style()),  // 흐리게 미리보기
-        Span::styled("_", Style::default().fg(theme.border_active).add_modifier(Modifier::SLOW_BLINK)),
+        Span::styled(before_cursor, theme.normal_style()),
+        Span::styled(cursor_char, cursor_style),
+        Span::styled(after_cursor, theme.normal_style()),
+        Span::styled(&display_preview_after, theme.dim_style()),  // 흐리게 미리보기
     ]);
     let input_area = Rect::new(inner.x + 1, inner.y + 1, inner.width - 2, 1);
     frame.render_widget(Paragraph::new(input_line), input_area);
@@ -632,13 +769,13 @@ fn draw_goto_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Them
     // 자동완성 목록 표시 (prefix 시작 위치에 맞춤)
     let list_start_y = inner.y + 2;
     // x 좌표: inner.x + 1 (패딩) + 2 ("> ") + prefix 시작 위치
-    // 루트 경로일 때는 "/" 위치에 맞추기 위해 1 감소
-    let list_x = if is_root_path {
+    // 루트 경로일 때는 "/" 위치에 맞추기 위해 1 감소 (단, prefix가 있을 때만)
+    let list_x = if is_root_path && display_prefix_start > 0 {
         inner.x + 1 + 2 + display_prefix_start as u16 - 1
     } else {
         inner.x + 1 + 2 + display_prefix_start as u16
     };
-    let list_width = if is_root_path {
+    let list_width = if is_root_path && display_prefix_start > 0 {
         inner.width.saturating_sub(2 + display_prefix_start as u16)
     } else {
         inner.width.saturating_sub(3 + display_prefix_start as u16)
@@ -1080,10 +1217,42 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
                         app.dialog = None;
                     }
                     KeyCode::Backspace => {
-                        dialog.input.pop();
+                        if dialog.cursor_pos > 0 {
+                            let mut chars: Vec<char> = dialog.input.chars().collect();
+                            chars.remove(dialog.cursor_pos - 1);
+                            dialog.input = chars.into_iter().collect();
+                            dialog.cursor_pos -= 1;
+                        }
+                    }
+                    KeyCode::Delete => {
+                        let char_count = dialog.input.chars().count();
+                        if dialog.cursor_pos < char_count {
+                            let mut chars: Vec<char> = dialog.input.chars().collect();
+                            chars.remove(dialog.cursor_pos);
+                            dialog.input = chars.into_iter().collect();
+                        }
+                    }
+                    KeyCode::Left => {
+                        if dialog.cursor_pos > 0 {
+                            dialog.cursor_pos -= 1;
+                        }
+                    }
+                    KeyCode::Right => {
+                        if dialog.cursor_pos < dialog.input.chars().count() {
+                            dialog.cursor_pos += 1;
+                        }
+                    }
+                    KeyCode::Home => {
+                        dialog.cursor_pos = 0;
+                    }
+                    KeyCode::End => {
+                        dialog.cursor_pos = dialog.input.chars().count();
                     }
                     KeyCode::Char(c) => {
-                        dialog.input.push(c);
+                        let mut chars: Vec<char> = dialog.input.chars().collect();
+                        chars.insert(dialog.cursor_pos, c);
+                        dialog.input = chars.into_iter().collect();
+                        dialog.cursor_pos += 1;
                     }
                     _ => {}
                 }
@@ -1223,19 +1392,82 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, _modifiers: KeyModifie
                 }
             }
             KeyCode::Backspace => {
-                dialog.input.pop();
-                // 입력 변경 후 자동완성 목록 업데이트
-                update_path_suggestions(dialog);
+                if dialog.cursor_pos > 0 {
+                    let mut chars: Vec<char> = dialog.input.chars().collect();
+                    chars.remove(dialog.cursor_pos - 1);
+                    dialog.input = chars.into_iter().collect();
+                    dialog.cursor_pos -= 1;
+                    // 입력 변경 후 자동완성 목록 업데이트
+                    update_path_suggestions(dialog);
+                }
+            }
+            KeyCode::Delete => {
+                let char_count = dialog.input.chars().count();
+                if dialog.cursor_pos < char_count {
+                    let mut chars: Vec<char> = dialog.input.chars().collect();
+                    chars.remove(dialog.cursor_pos);
+                    dialog.input = chars.into_iter().collect();
+                    update_path_suggestions(dialog);
+                }
+            }
+            KeyCode::Left => {
+                // 완성 이름 시작 위치 계산 (마지막 '/' 다음 위치)
+                let input_chars: Vec<char> = dialog.input.chars().collect();
+                let prefix_start = if dialog.input.ends_with('/') {
+                    input_chars.len()
+                } else {
+                    input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
+                };
+                if dialog.cursor_pos > prefix_start {
+                    dialog.cursor_pos -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if dialog.cursor_pos < dialog.input.chars().count() {
+                    dialog.cursor_pos += 1;
+                }
+            }
+            KeyCode::Home => {
+                // 완성 이름 시작 위치로 이동
+                let input_chars: Vec<char> = dialog.input.chars().collect();
+                let prefix_start = if dialog.input.ends_with('/') {
+                    input_chars.len()
+                } else {
+                    input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
+                };
+                dialog.cursor_pos = prefix_start;
+            }
+            KeyCode::End => {
+                dialog.cursor_pos = dialog.input.chars().count();
             }
             KeyCode::Char(c) => {
                 if c == '~' {
                     // '~' 입력 시 홈 폴더 경로로 설정
                     if let Some(home) = dirs::home_dir() {
                         dialog.input = format!("{}/", home.display());
+                        dialog.cursor_pos = dialog.input.chars().count();
+                        update_path_suggestions(dialog);
+                    }
+                } else if c == '/' {
+                    // 연속 '/' 입력 방지
+                    let chars: Vec<char> = dialog.input.chars().collect();
+                    let prev_char = if dialog.cursor_pos > 0 {
+                        chars.get(dialog.cursor_pos - 1).copied()
+                    } else {
+                        None
+                    };
+                    if prev_char != Some('/') {
+                        let mut chars = chars;
+                        chars.insert(dialog.cursor_pos, c);
+                        dialog.input = chars.into_iter().collect();
+                        dialog.cursor_pos += 1;
                         update_path_suggestions(dialog);
                     }
                 } else {
-                    dialog.input.push(c);
+                    let mut chars: Vec<char> = dialog.input.chars().collect();
+                    chars.insert(dialog.cursor_pos, c);
+                    dialog.input = chars.into_iter().collect();
+                    dialog.cursor_pos += 1;
                     // 입력 변경 후 자동완성 목록 업데이트
                     update_path_suggestions(dialog);
                 }
@@ -1351,8 +1583,52 @@ fn handle_copy_move_dialog_input(app: &mut App, code: KeyCode, _modifiers: KeyMo
                 }
             }
             KeyCode::Backspace => {
-                dialog.input.pop();
-                update_path_suggestions(dialog);
+                if dialog.cursor_pos > 0 {
+                    let mut chars: Vec<char> = dialog.input.chars().collect();
+                    chars.remove(dialog.cursor_pos - 1);
+                    dialog.input = chars.into_iter().collect();
+                    dialog.cursor_pos -= 1;
+                    update_path_suggestions(dialog);
+                }
+            }
+            KeyCode::Delete => {
+                let char_count = dialog.input.chars().count();
+                if dialog.cursor_pos < char_count {
+                    let mut chars: Vec<char> = dialog.input.chars().collect();
+                    chars.remove(dialog.cursor_pos);
+                    dialog.input = chars.into_iter().collect();
+                    update_path_suggestions(dialog);
+                }
+            }
+            KeyCode::Left => {
+                // 완성 이름 시작 위치 계산 (마지막 '/' 다음 위치)
+                let input_chars: Vec<char> = dialog.input.chars().collect();
+                let prefix_start = if dialog.input.ends_with('/') {
+                    input_chars.len()
+                } else {
+                    input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
+                };
+                if dialog.cursor_pos > prefix_start {
+                    dialog.cursor_pos -= 1;
+                }
+            }
+            KeyCode::Right => {
+                if dialog.cursor_pos < dialog.input.chars().count() {
+                    dialog.cursor_pos += 1;
+                }
+            }
+            KeyCode::Home => {
+                // 완성 이름 시작 위치로 이동
+                let input_chars: Vec<char> = dialog.input.chars().collect();
+                let prefix_start = if dialog.input.ends_with('/') {
+                    input_chars.len()
+                } else {
+                    input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
+                };
+                dialog.cursor_pos = prefix_start;
+            }
+            KeyCode::End => {
+                dialog.cursor_pos = dialog.input.chars().count();
             }
             KeyCode::Char(c) => {
                 if c == '/' && completion_visible {
@@ -1369,10 +1645,29 @@ fn handle_copy_move_dialog_input(app: &mut App, code: KeyCode, _modifiers: KeyMo
                 } else if c == '~' {
                     if let Some(home) = dirs::home_dir() {
                         dialog.input = format!("{}/", home.display());
+                        dialog.cursor_pos = dialog.input.chars().count();
+                        update_path_suggestions(dialog);
+                    }
+                } else if c == '/' {
+                    // 연속 '/' 입력 방지
+                    let chars: Vec<char> = dialog.input.chars().collect();
+                    let prev_char = if dialog.cursor_pos > 0 {
+                        chars.get(dialog.cursor_pos - 1).copied()
+                    } else {
+                        None
+                    };
+                    if prev_char != Some('/') {
+                        let mut chars = chars;
+                        chars.insert(dialog.cursor_pos, c);
+                        dialog.input = chars.into_iter().collect();
+                        dialog.cursor_pos += 1;
                         update_path_suggestions(dialog);
                     }
                 } else {
-                    dialog.input.push(c);
+                    let mut chars: Vec<char> = dialog.input.chars().collect();
+                    chars.insert(dialog.cursor_pos, c);
+                    dialog.input = chars.into_iter().collect();
+                    dialog.cursor_pos += 1;
                     update_path_suggestions(dialog);
                 }
             }
@@ -1792,6 +2087,7 @@ mod tests {
         let dialog = Dialog {
             dialog_type: DialogType::Copy,
             input: "/home/user/".to_string(),
+            cursor_pos: 11,
             message: "Copy files".to_string(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
@@ -1809,9 +2105,12 @@ mod tests {
         let temp_dir = create_temp_test_dir();
         fs::write(temp_dir.join("test.txt"), "").unwrap();
 
+        let input = format!("{}/", temp_dir.display());
+        let cursor_pos = input.chars().count();
         let mut dialog = Dialog {
             dialog_type: DialogType::Goto,
-            input: format!("{}/", temp_dir.display()),
+            input,
+            cursor_pos,
             message: String::new(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
@@ -1831,9 +2130,12 @@ mod tests {
         let temp_dir = create_temp_test_dir();
         fs::write(temp_dir.join("apple.txt"), "").unwrap();
 
+        let input = format!("{}/xyz", temp_dir.display());
+        let cursor_pos = input.chars().count();
         let mut dialog = Dialog {
             dialog_type: DialogType::Goto,
-            input: format!("{}/xyz", temp_dir.display()),
+            input,
+            cursor_pos,
             message: String::new(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
