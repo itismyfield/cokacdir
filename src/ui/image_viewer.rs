@@ -1,5 +1,5 @@
 use crossterm::event::KeyCode;
-use image::{GenericImageView, DynamicImage};
+use image::DynamicImage;
 use ratatui::{
     layout::Rect,
     style::{Color, Style},

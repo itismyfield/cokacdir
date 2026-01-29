@@ -817,7 +817,7 @@ fn draw_input(frame: &mut Frame, state: &AIScreenState, area: Rect, theme: &Them
         let spinner_frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
         let frame_idx = (std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
+            .unwrap_or_default()
             .as_millis() / 100) as usize % spinner_frames.len();
 
         let processing_line = Line::from(vec![
@@ -1722,7 +1722,7 @@ mod tests {
             backend::TestBackend,
             Terminal,
             widgets::{Paragraph, Wrap},
-            text::{Line, Span},
+            text::Line,
             layout::Rect,
         };
 
@@ -2034,14 +2034,6 @@ mod tests {
             // Count rows used
             let mut rows_used = 0;
             for y in 0..height {
-                let mut has_any_char = false;
-                for x in 0..width {
-                    let cell = buffer.cell((x, y)).unwrap();
-                    // Check if cell has any content (even space can be "content" if it's the first row)
-                    if y == 0 || cell.symbol() != " " {
-                        has_any_char = true;
-                    }
-                }
                 // For the first line, always count it
                 // For subsequent lines, only count if there's actual visible content
                 if y == 0 {
