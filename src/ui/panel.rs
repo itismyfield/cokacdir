@@ -10,11 +10,12 @@ use unicode_width::UnicodeWidthStr;
 use super::{app::{PanelState, SortBy, SortOrder}, theme::Theme};
 use crate::utils::format::format_size;
 
-pub fn draw(frame: &mut Frame, panel: &mut PanelState, area: Rect, is_active: bool, theme: &Theme) {
+pub fn draw(frame: &mut Frame, panel: &mut PanelState, area: Rect, is_active: bool, is_bookmarked: bool, theme: &Theme) {
     let inner_width = area.width.saturating_sub(2) as usize;
 
     // Build path display (truncate if too long)
     let path_str = panel.path.display().to_string();
+    let bookmark_marker = if is_bookmarked { "✻" } else { "" };
     let display_path = if inner_width > 4 && path_str.len() > inner_width.saturating_sub(4) {
         let suffix_len = inner_width.saturating_sub(7);
         let start = path_str.len().saturating_sub(suffix_len);
@@ -23,9 +24,9 @@ pub fn draw(frame: &mut Frame, panel: &mut PanelState, area: Rect, is_active: bo
             .map(|(i, _)| i)
             .find(|&i| i >= start)
             .unwrap_or(path_str.len());
-        format!("...{}", &path_str[safe_start..])
+        format!("{}...{}", bookmark_marker, &path_str[safe_start..])
     } else {
-        path_str
+        format!("{}{}", bookmark_marker, path_str)
     };
 
     let block = Block::default()

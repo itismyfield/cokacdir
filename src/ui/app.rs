@@ -252,6 +252,22 @@ impl SettingsState {
     }
 }
 
+/// Fuzzy match: check if all characters in pattern appear in text in order
+/// e.g., "thse" matches "/path/to/base" (t-h-s-e appear in sequence)
+pub fn fuzzy_match(text: &str, pattern: &str) -> bool {
+    let mut text_chars = text.chars().peekable();
+    for pattern_char in pattern.chars() {
+        loop {
+            match text_chars.next() {
+                Some(c) if c == pattern_char => break,
+                Some(_) => continue,
+                None => return false,
+            }
+        }
+    }
+    true
+}
+
 /// Resolution option for duplicate file conflicts
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConflictResolution {
@@ -465,6 +481,7 @@ pub struct Dialog {
     pub message: String,
     pub completion: Option<PathCompletion>,  // 경로 자동완성용
     pub selected_button: usize,  // 버튼 선택 인덱스 (0: Yes, 1: No)
+    pub selection: Option<(usize, usize)>,  // 선택 범위 (start, end) - None이면 선택 없음
 }
 
 #[derive(Debug, Clone)]
@@ -1092,6 +1109,7 @@ impl App {
             message: String::new(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
     }
 
@@ -1275,6 +1293,7 @@ impl App {
                             message: format!("This image is {:.1}MB. Open anyway?", size_mb),
                             completion: None,
                             selected_button: 1, // Default to "No"
+                            selection: None,
                         });
                     } else {
                         self.pending_large_file = Some(path);
@@ -1285,6 +1304,7 @@ impl App {
                             message: format!("This file is {:.1}MB. Open anyway?", size_mb),
                             completion: None,
                             selected_button: 1, // Default to "No"
+                            selection: None,
                         });
                     }
                 } else if is_image {
@@ -1298,6 +1318,7 @@ impl App {
                             message: "Terminal doesn't support true color. Open anyway?".to_string(),
                             completion: None,
                             selected_button: 1, // Default to "No"
+                            selection: None,
                         });
                     } else {
                         self.image_viewer_state = Some(
@@ -1494,6 +1515,7 @@ impl App {
             message: error_message.to_string(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
     }
 
@@ -1666,6 +1688,24 @@ impl App {
         self.message_timer = 10; // ~1 second at 10 FPS
     }
 
+    /// Toggle bookmark for the current panel's path
+    pub fn toggle_bookmark(&mut self) {
+        let current_path = self.active_panel().path.display().to_string();
+
+        if let Some(pos) = self.settings.bookmarked_path.iter().position(|p| p == &current_path) {
+            // Already bookmarked - remove it
+            self.settings.bookmarked_path.remove(pos);
+            self.show_message(&format!("Bookmark removed: {}", current_path));
+        } else {
+            // Not bookmarked - add it
+            self.settings.bookmarked_path.push(current_path.clone());
+            self.show_message(&format!("Bookmark added: {}", current_path));
+        }
+
+        // Save settings immediately
+        let _ = self.settings.save();
+    }
+
     pub fn refresh_panels(&mut self) {
         self.left_panel.selected_files.clear();
         self.right_panel.selected_files.clear();
@@ -1787,6 +1827,7 @@ impl App {
                             message: "Terminal doesn't support true color. Open anyway?".to_string(),
                             completion: None,
                             selected_button: 1, // Default to "No"
+                            selection: None,
                         });
                         return;
                     }
@@ -1808,6 +1849,7 @@ impl App {
                             message: format!("This image is {:.1}MB. Open anyway?", size_mb),
                             completion: None,
                             selected_button: 1, // Default to "No"
+                            selection: None,
                         });
                         return;
                     }
@@ -1886,6 +1928,7 @@ impl App {
             message: file_list.clone(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
+            selection: None,
         });
     }
 
@@ -1914,6 +1957,7 @@ impl App {
             message: file_list.clone(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
+            selection: None,
         });
     }
 
@@ -1935,6 +1979,7 @@ impl App {
             message: format!("Delete {}?", file_list),
             completion: None,
             selected_button: 1,  // 기본값: No (안전을 위해)
+            selection: None,
         });
     }
 
@@ -1946,6 +1991,7 @@ impl App {
             message: String::new(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
     }
 
@@ -1953,14 +1999,34 @@ impl App {
         let panel = self.active_panel();
         if let Some(file) = panel.current_file() {
             if file.name != ".." {
-                let cursor_pos = file.name.chars().count();
+                let name = &file.name;
+                let len = name.chars().count();
+
+                // 확장자 제외한 선택 범위 계산
+                // 디렉토리: 전체 선택
+                // 파일: 마지막 '.' 앞까지 선택 (숨김파일 고려)
+                let selection_end = if file.is_directory {
+                    len
+                } else {
+                    // 숨김 파일(.으로 시작)의 경우 첫 번째 점 이후의 확장자만 찾음
+                    let search_start = if name.starts_with('.') { 1 } else { 0 };
+                    if let Some(dot_pos) = name[search_start..].rfind('.') {
+                        // 확장자가 있으면 그 앞까지
+                        name[..search_start].chars().count() + name[search_start..search_start + dot_pos].chars().count()
+                    } else {
+                        // 확장자 없으면 전체
+                        len
+                    }
+                };
+
                 self.dialog = Some(Dialog {
                     dialog_type: DialogType::Rename,
                     input: file.name.clone(),
-                    cursor_pos,
+                    cursor_pos: selection_end,
                     message: String::new(),
                     completion: None,
                     selected_button: 0,
+                    selection: Some((0, selection_end)),
                 });
             } else {
                 self.show_message("Select a file to rename");
@@ -1993,6 +2059,7 @@ impl App {
             message: file_list,
             completion: None,
             selected_button: 0,
+            selection: None,
         });
     }
 
@@ -2004,19 +2071,21 @@ impl App {
             message: "Search for:".to_string(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
     }
 
     pub fn show_goto_dialog(&mut self) {
         let current_path = self.active_panel().path.display().to_string();
-        let cursor_pos = current_path.chars().count();
+        let len = current_path.chars().count();
         self.dialog = Some(Dialog {
             dialog_type: DialogType::Goto,
             input: current_path,
-            cursor_pos,
+            cursor_pos: len,
             message: "Go to path:".to_string(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
+            selection: Some((0, len)),  // 전체 선택
         });
     }
 
@@ -2150,6 +2219,7 @@ impl App {
                 message: String::new(),
                 completion: None,
                 selected_button: 0,
+                selection: None,
             });
             return;
         }
@@ -2226,6 +2296,7 @@ impl App {
             message: String::new(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
     }
 
@@ -2287,6 +2358,7 @@ impl App {
                 message: String::new(),
                 completion: None,
                 selected_button: 0,
+                selection: None,
             });
             return;
         }
@@ -2363,6 +2435,7 @@ impl App {
             message: String::new(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
     }
 
@@ -2614,6 +2687,7 @@ impl App {
             message: String::new(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
     }
 
@@ -2676,6 +2750,7 @@ impl App {
             message: String::new(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
 
         // Keep clipboard for copy operations (can paste multiple times)
@@ -2798,6 +2873,7 @@ impl App {
             message: String::new(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
 
         // Keep clipboard for copy operations
@@ -2906,6 +2982,7 @@ impl App {
             message: String::new(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
 
         // Keep clipboard for copy operations (can paste multiple times)
@@ -3068,6 +3145,7 @@ impl App {
                 message: String::new(),
                 completion: None,
                 selected_button: 0,
+                selection: None,
             });
             return;
         }
@@ -3124,6 +3202,7 @@ impl App {
             message: String::new(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
 
         // Clone tar_path from settings for use in background thread
@@ -3492,6 +3571,7 @@ impl App {
             message: String::new(),
             completion: None,
             selected_button: 0,
+            selection: None,
         });
 
         // Clone tar_path from settings for use in background thread

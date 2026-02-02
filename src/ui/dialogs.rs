@@ -13,7 +13,7 @@ use ratatui::{
 use crate::services::file_ops::FileOperationType;
 
 use super::{
-    app::{App, ConflictResolution, ConflictState, Dialog, DialogType, PathCompletion, SettingsState},
+    app::{App, ConflictResolution, ConflictState, Dialog, DialogType, PathCompletion, SettingsState, fuzzy_match},
     theme::Theme,
 };
 
@@ -284,7 +284,17 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
         DialogType::Goto => {
             let w = area.width.saturating_sub(DIALOG_MARGIN).max(DIALOG_MIN_WIDTH);
             let max_h = GOTO_BASE_HEIGHT + MAX_COMPLETION_HEIGHT;
-            let h = GOTO_BASE_HEIGHT + completion_height;
+
+            // 북마크 모드인지 확인 (입력이 /나 ~로 시작하지 않으면 북마크 모드)
+            let is_bookmark_mode = !dialog.input.starts_with('/') && !dialog.input.starts_with('~');
+
+            let h = if is_bookmark_mode && !app.settings.bookmarked_path.is_empty() {
+                // 북마크 모드이고 북마크가 있으면 최대 높이 사용
+                max_h
+            } else {
+                GOTO_BASE_HEIGHT + completion_height
+            };
+
             (w, h, max_h)
         }
         DialogType::Search | DialogType::Mkdir | DialogType::Rename | DialogType::Tar => {
@@ -329,7 +339,7 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
             draw_copy_move_dialog(frame, dialog, dialog_area, theme);
         }
         DialogType::Goto => {
-            draw_goto_dialog(frame, dialog, dialog_area, theme);
+            draw_goto_dialog(frame, app, dialog, dialog_area, theme);
         }
         DialogType::Search | DialogType::Mkdir | DialogType::Rename | DialogType::Tar => {
             draw_simple_input_dialog(frame, dialog, dialog_area, theme);
@@ -429,12 +439,32 @@ fn draw_simple_input_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, them
         .bg(theme.dialog.input_cursor_bg)
         .add_modifier(Modifier::SLOW_BLINK);
 
-    let input_line = Line::from(vec![
-        Span::styled("> ", Style::default().fg(theme.dialog.input_prompt)),
-        Span::styled(before_cursor, Style::default().fg(theme.dialog.input_text)),
-        Span::styled(cursor_char, cursor_style),
-        Span::styled(after_cursor, Style::default().fg(theme.dialog.input_text)),
-    ]);
+    // 선택 스타일
+    let selection_style = Style::default()
+        .fg(theme.dialog.input_cursor_fg)
+        .bg(theme.dialog.input_cursor_bg);
+
+    let input_line = if let Some((sel_start, sel_end)) = dialog.selection {
+        // 선택 범위가 있는 경우
+        let sel_start = sel_start.min(display_chars.len());
+        let sel_end = sel_end.min(display_chars.len());
+        let before_sel: String = display_chars[..sel_start].iter().collect();
+        let selected: String = display_chars[sel_start..sel_end].iter().collect();
+        let after_sel: String = display_chars[sel_end..].iter().collect();
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(theme.dialog.input_prompt)),
+            Span::styled(before_sel, Style::default().fg(theme.dialog.input_text)),
+            Span::styled(selected, selection_style),
+            Span::styled(after_sel, Style::default().fg(theme.dialog.input_text)),
+        ])
+    } else {
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(theme.dialog.input_prompt)),
+            Span::styled(before_cursor, Style::default().fg(theme.dialog.input_text)),
+            Span::styled(cursor_char, cursor_style),
+            Span::styled(after_cursor, Style::default().fg(theme.dialog.input_text)),
+        ])
+    };
 
     // Tar 다이얼로그의 경우 파일 목록 표시
     if dialog.dialog_type == DialogType::Tar && !dialog.message.is_empty() {
@@ -764,8 +794,8 @@ fn draw_input_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &The
     frame.render_widget(Paragraph::new(help), help_area);
 }
 
-/// Go to Path 대화상자 렌더링 (자동완성 목록 포함)
-fn draw_goto_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Theme) {
+/// Go to Path 대화상자 렌더링 (자동완성 목록 및 북마크 포함)
+fn draw_goto_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, theme: &Theme) {
     let title = " Go to Path ";
 
     let block = Block::default()
@@ -889,54 +919,145 @@ fn draw_goto_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Them
         .bg(theme.dialog.input_cursor_bg)
         .add_modifier(Modifier::SLOW_BLINK);
 
-    // 입력 필드 렌더링 (선택된 항목 미리보기 포함)
-    let input_line = Line::from(vec![
-        Span::styled("> ", Style::default().fg(theme.dialog.input_prompt)),
-        Span::styled(before_cursor, Style::default().fg(theme.dialog.input_text)),
-        Span::styled(cursor_char, cursor_style),
-        Span::styled(after_cursor, Style::default().fg(theme.dialog.input_text)),
-        Span::styled(&display_preview_after, Style::default().fg(theme.dialog.preview_suffix_text)),  // 흐리게 미리보기
-    ]);
+    // 선택 스타일
+    let selection_style = Style::default()
+        .fg(theme.dialog.input_cursor_fg)
+        .bg(theme.dialog.input_cursor_bg);
+
+    // 입력 필드 렌더링 (선택 범위 지원)
+    let input_line = if let Some((sel_start, sel_end)) = dialog.selection {
+        // 선택 범위가 있는 경우
+        let sel_start = sel_start.min(display_chars.len());
+        let sel_end = sel_end.min(display_chars.len());
+        let before_sel: String = display_chars[..sel_start].iter().collect();
+        let selected: String = display_chars[sel_start..sel_end].iter().collect();
+        let after_sel: String = display_chars[sel_end..].iter().collect();
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(theme.dialog.input_prompt)),
+            Span::styled(before_sel, Style::default().fg(theme.dialog.input_text)),
+            Span::styled(selected, selection_style),
+            Span::styled(after_sel, Style::default().fg(theme.dialog.input_text)),
+        ])
+    } else {
+        // 일반 상태: 커서 위치에 따라 분리
+        Line::from(vec![
+            Span::styled("> ", Style::default().fg(theme.dialog.input_prompt)),
+            Span::styled(before_cursor, Style::default().fg(theme.dialog.input_text)),
+            Span::styled(cursor_char, cursor_style),
+            Span::styled(after_cursor, Style::default().fg(theme.dialog.input_text)),
+            Span::styled(&display_preview_after, Style::default().fg(theme.dialog.preview_suffix_text)),  // 흐리게 미리보기
+        ])
+    };
     let input_area = Rect::new(inner.x + 1, input_y, inner.width - 2, 1);
     frame.render_widget(Paragraph::new(input_line), input_area);
 
-    // 자동완성 목록 표시 (prefix 시작 위치에 맞춤)
-    // x 좌표: inner.x + 1 (패딩) + 2 ("> ") + prefix 시작 위치
-    // 루트 경로일 때는 "/" 위치에 맞추기 위해 1 감소 (단, prefix가 있을 때만)
-    let list_x = if is_root_path && display_prefix_start > 0 {
-        inner.x + 1 + 2 + display_prefix_start as u16 - 1
-    } else {
-        inner.x + 1 + 2 + display_prefix_start as u16
-    };
-    let list_width = if is_root_path && display_prefix_start > 0 {
-        inner.width.saturating_sub(2 + display_prefix_start as u16)
-    } else {
-        inner.width.saturating_sub(3 + display_prefix_start as u16)
-    };
-
-    if let Some(ref completion) = dialog.completion {
-        if completion.visible && !completion.suggestions.is_empty() {
-            draw_completion_list(
-                frame,
-                completion,
-                Rect::new(list_x, list_y, list_width, list_height),
-                theme,
-                is_root_path,
-            );
-        }
-    }
+    // 경로 입력 모드 vs 북마크 검색 모드 분기
+    let is_path_mode = dialog.input.starts_with('/') || dialog.input.starts_with('~');
 
     // Help (맨 아래에 표시)
     let help_key_style = Style::default().fg(theme.dialog.help_key_text).add_modifier(Modifier::BOLD);
     let help_label_style = Style::default().fg(theme.dialog.help_label_text);
 
-    let help_line = if let Some(ref completion) = dialog.completion {
-        if completion.visible && !completion.suggestions.is_empty() {
+    if is_path_mode {
+        // === 경로 입력 모드: 기존 Go to Path 동작 그대로 ===
+        // 자동완성 목록 표시 (prefix 시작 위치에 맞춤)
+        // x 좌표: inner.x + 1 (패딩) + 2 ("> ") + prefix 시작 위치
+        // 루트 경로일 때는 "/" 위치에 맞추기 위해 1 감소 (단, prefix가 있을 때만)
+        let list_x = if is_root_path && display_prefix_start > 0 {
+            inner.x + 1 + 2 + display_prefix_start as u16 - 1
+        } else {
+            inner.x + 1 + 2 + display_prefix_start as u16
+        };
+        let list_width = if is_root_path && display_prefix_start > 0 {
+            inner.width.saturating_sub(2 + display_prefix_start as u16)
+        } else {
+            inner.width.saturating_sub(3 + display_prefix_start as u16)
+        };
+
+        if let Some(ref completion) = dialog.completion {
+            if completion.visible && !completion.suggestions.is_empty() {
+                draw_completion_list(
+                    frame,
+                    completion,
+                    Rect::new(list_x, list_y, list_width, list_height),
+                    theme,
+                    is_root_path,
+                );
+            }
+        }
+
+        // 기존 도움말
+        let help_line = if let Some(ref completion) = dialog.completion {
+            if completion.visible && !completion.suggestions.is_empty() {
+                Line::from(vec![
+                    Span::styled("↑↓", help_key_style),
+                    Span::styled(":select ", help_label_style),
+                    Span::styled("Tab", help_key_style),
+                    Span::styled(":complete ", help_label_style),
+                    Span::styled("Enter", help_key_style),
+                    Span::styled(":go ", help_label_style),
+                    Span::styled("Esc", help_key_style),
+                    Span::styled(":cancel", help_label_style),
+                ])
+            } else {
+                Line::from(vec![
+                    Span::styled("Tab", help_key_style),
+                    Span::styled(":complete ", help_label_style),
+                    Span::styled("Enter", help_key_style),
+                    Span::styled(":go ", help_label_style),
+                    Span::styled("Esc", help_key_style),
+                    Span::styled(":cancel", help_label_style),
+                ])
+            }
+        } else {
+            Line::from(vec![
+                Span::styled("Enter", help_key_style),
+                Span::styled(":go ", help_label_style),
+                Span::styled("Esc", help_key_style),
+                Span::styled(":cancel", help_label_style),
+            ])
+        };
+        let help_area = Rect::new(inner.x + 1, help_y, inner.width - 2, 1);
+        frame.render_widget(Paragraph::new(help_line), help_area);
+    } else {
+        // === 북마크 검색 모드: 북마크만 표시 ===
+        let filter_lower = dialog.input.to_lowercase();
+        let filtered_bookmarks: Vec<&String> = app.settings.bookmarked_path.iter()
+            .filter(|p| {
+                if filter_lower.is_empty() {
+                    true
+                } else {
+                    fuzzy_match(&p.to_lowercase(), &filter_lower)
+                }
+            })
+            .collect();
+
+        let has_bookmarks = !filtered_bookmarks.is_empty();
+
+        // 목록 영역 (입력 프롬프트 "> "에 맞춤)
+        let list_x = inner.x + 1 + 2;  // 패딩 + "> " 프롬프트
+        let list_width = inner.width.saturating_sub(4);
+
+        if has_bookmarks {
+            // 선택 인덱스를 필터링된 목록 크기에 맞게 조정
+            let bookmark_count = filtered_bookmarks.len();
+            let selected_idx = dialog.completion.as_ref()
+                .map(|c| c.selected_index.min(bookmark_count.saturating_sub(1)))
+                .unwrap_or(0);
+            draw_bookmark_list(
+                frame,
+                &filtered_bookmarks,
+                selected_idx,
+                Rect::new(list_x, list_y, list_width, list_height),
+                theme,
+            );
+        }
+
+        // 북마크 모드 도움말
+        let help_line = if has_bookmarks {
             Line::from(vec![
                 Span::styled("↑↓", help_key_style),
                 Span::styled(":select ", help_label_style),
-                Span::styled("Tab", help_key_style),
-                Span::styled(":complete ", help_label_style),
                 Span::styled("Enter", help_key_style),
                 Span::styled(":go ", help_label_style),
                 Span::styled("Esc", help_key_style),
@@ -944,25 +1065,15 @@ fn draw_goto_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Them
             ])
         } else {
             Line::from(vec![
-                Span::styled("Tab", help_key_style),
-                Span::styled(":complete ", help_label_style),
                 Span::styled("Enter", help_key_style),
                 Span::styled(":go ", help_label_style),
                 Span::styled("Esc", help_key_style),
                 Span::styled(":cancel", help_label_style),
             ])
-        }
-    } else {
-        Line::from(vec![
-            Span::styled("Enter", help_key_style),
-            Span::styled(":confirm ", help_label_style),
-            Span::styled("Esc", help_key_style),
-            Span::styled(":cancel", help_label_style),
-        ])
-    };
-
-    let help_area = Rect::new(inner.x + 1, help_y, inner.width - 2, 1);
-    frame.render_widget(Paragraph::new(help_line), help_area);
+        };
+        let help_area = Rect::new(inner.x + 1, help_y, inner.width - 2, 1);
+        frame.render_widget(Paragraph::new(help_line), help_area);
+    }
 }
 
 /// Progress dialog for file operations
@@ -1412,6 +1523,86 @@ fn format_size(bytes: u64) -> String {
     }
 }
 
+/// 북마크 목록 렌더링 (Go to Path 다이얼로그용)
+fn draw_bookmark_list(
+    frame: &mut Frame,
+    bookmarks: &[&String],
+    selected_index: usize,
+    area: Rect,
+    theme: &Theme,
+) {
+    let max_visible = area.height.min(8) as usize;
+    let total = bookmarks.len();
+
+    // 스크롤 계산: 선택된 항목이 항상 보이도록
+    let scroll_offset = if total <= max_visible || selected_index < max_visible / 2 {
+        0
+    } else if selected_index >= total - max_visible / 2 {
+        total.saturating_sub(max_visible)
+    } else {
+        selected_index.saturating_sub(max_visible / 2)
+    };
+
+    let visible_items: Vec<&&String> = bookmarks
+        .iter()
+        .skip(scroll_offset)
+        .take(max_visible)
+        .collect();
+
+    let selected_style = Style::default()
+        .bg(theme.dialog.autocomplete_selected_bg)
+        .fg(theme.dialog.autocomplete_selected_text)
+        .add_modifier(Modifier::BOLD);
+    let normal_style = Style::default().fg(theme.dialog.autocomplete_directory_text);
+
+    for (i, bookmark) in visible_items.iter().enumerate() {
+        let actual_index = scroll_offset + i;
+        let is_selected = actual_index == selected_index;
+
+        let style = if is_selected {
+            selected_style
+        } else {
+            normal_style
+        };
+
+        // 경로 표시 (너무 길면 앞부분 생략) - 문자 단위로 처리
+        let max_width = area.width as usize;
+        let chars: Vec<char> = bookmark.chars().collect();
+        let char_count = chars.len();
+        let display_path = if char_count > max_width {
+            let suffix_len = max_width.saturating_sub(3);
+            let start = char_count.saturating_sub(suffix_len);
+            format!("...{}", chars[start..].iter().collect::<String>())
+        } else {
+            bookmark.to_string()
+        };
+
+        // 전체 라인을 선택 스타일로 채우기
+        let padded = format!("{:<width$}", display_path, width = max_width);
+        let line = Line::from(Span::styled(padded, style));
+
+        let y = area.y + i as u16;
+        if y < area.y + area.height {
+            let item_area = Rect::new(area.x, y, area.width, 1);
+            frame.render_widget(Paragraph::new(line), item_area);
+        }
+    }
+
+    // 스크롤 인디케이터 (오른쪽에 표시)
+    if total > max_visible {
+        let scroll_info = format!("[{}/{}]", selected_index + 1, total);
+        let info_len = scroll_info.len() as u16;
+        let info_x = area.x + area.width.saturating_sub(info_len + 1);
+        let info_y = area.y;
+        if info_x >= area.x {
+            frame.render_widget(
+                Paragraph::new(scroll_info).style(Style::default().fg(theme.dialog.autocomplete_scroll_info)),
+                Rect::new(info_x, info_y, info_len, 1),
+            );
+        }
+    }
+}
+
 /// 자동완성 목록 렌더링
 fn draw_completion_list(
     frame: &mut Frame,
@@ -1598,6 +1789,54 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
                 }
             }
             _ => {
+                // selection 상태에서의 특수 처리
+                if let Some((sel_start, sel_end)) = dialog.selection {
+                    match code {
+                        KeyCode::Char(c) => {
+                            // 선택 범위 삭제 후 새 문자 입력
+                            let mut chars: Vec<char> = dialog.input.chars().collect();
+                            chars.drain(sel_start..sel_end);
+                            chars.insert(sel_start, c);
+                            dialog.input = chars.into_iter().collect();
+                            dialog.cursor_pos = sel_start + 1;
+                            dialog.selection = None;
+                            return false;
+                        }
+                        KeyCode::Backspace | KeyCode::Delete => {
+                            // 선택 범위 삭제
+                            let mut chars: Vec<char> = dialog.input.chars().collect();
+                            chars.drain(sel_start..sel_end);
+                            dialog.input = chars.into_iter().collect();
+                            dialog.cursor_pos = sel_start;
+                            dialog.selection = None;
+                            return false;
+                        }
+                        KeyCode::Left | KeyCode::Home => {
+                            // 선택 해제, 커서를 선택 시작으로
+                            dialog.selection = None;
+                            dialog.cursor_pos = sel_start;
+                            return false;
+                        }
+                        KeyCode::Right | KeyCode::End => {
+                            // 선택 해제, 커서를 선택 끝으로
+                            dialog.selection = None;
+                            dialog.cursor_pos = sel_end;
+                            return false;
+                        }
+                        KeyCode::Esc => {
+                            app.dialog = None;
+                            return false;
+                        }
+                        KeyCode::Enter => {
+                            // Enter는 선택 해제 후 계속 진행
+                            dialog.selection = None;
+                        }
+                        _ => {
+                            dialog.selection = None;
+                        }
+                    }
+                }
+
                 match code {
                     KeyCode::Enter => {
                         let input = dialog.input.clone();
@@ -1693,214 +1932,424 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
 /// Go to Path 대화상자 키 입력 처리
 fn handle_goto_dialog_input(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -> bool {
     if let Some(ref mut dialog) = app.dialog {
-        let completion_visible = dialog
-            .completion
-            .as_ref()
-            .map(|c| c.visible && !c.suggestions.is_empty())
-            .unwrap_or(false);
+        // ' 키는 항상 북마크 토글
+        if code == KeyCode::Char('\'') {
+            app.dialog = None;
+            app.toggle_bookmark();
+            return false;
+        }
 
-        match code {
-            KeyCode::Tab => {
-                if completion_visible {
-                    // 목록에서 선택된 항목으로 완성
-                    let (base_dir, _) = parse_path_for_completion(&dialog.input);
-                    let suggestion = dialog
-                        .completion
-                        .as_ref()
-                        .and_then(|c| c.suggestions.get(c.selected_index).cloned());
-
-                    if let Some(suggestion) = suggestion {
-                        apply_completion(dialog, &base_dir, &suggestion);
-                    }
-                    // 완성 후 새로운 suggestions 업데이트
-                    update_path_suggestions(dialog);
-                } else {
-                    // 목록이 없으면 자동완성 트리거
-                    trigger_path_completion(dialog);
-                }
-            }
-            KeyCode::BackTab => {
-                // Shift+Tab: 이전 항목
-                if completion_visible {
-                    if let Some(ref mut completion) = dialog.completion {
-                        if !completion.suggestions.is_empty() {
-                            if completion.selected_index == 0 {
-                                completion.selected_index = completion.suggestions.len() - 1;
-                            } else {
-                                completion.selected_index -= 1;
-                            }
-                        }
-                    }
-                }
-            }
-            KeyCode::Up => {
-                if completion_visible {
-                    if let Some(ref mut completion) = dialog.completion {
-                        if !completion.suggestions.is_empty() {
-                            if completion.selected_index == 0 {
-                                completion.selected_index = completion.suggestions.len() - 1;
-                            } else {
-                                completion.selected_index -= 1;
-                            }
-                        }
-                    }
-                }
-            }
-            KeyCode::Down => {
-                if completion_visible {
-                    if let Some(ref mut completion) = dialog.completion {
-                        if !completion.suggestions.is_empty() {
-                            completion.selected_index =
-                                (completion.selected_index + 1) % completion.suggestions.len();
-                        }
-                    }
-                }
-            }
-            KeyCode::Enter => {
-                if completion_visible {
-                    // 선택된 항목으로 완성
-                    let (base_dir, _) = parse_path_for_completion(&dialog.input);
-                    let suggestion = dialog
-                        .completion
-                        .as_ref()
-                        .and_then(|c| c.suggestions.get(c.selected_index).cloned());
-
-                    if let Some(suggestion) = suggestion {
-                        apply_completion(dialog, &base_dir, &suggestion);
-                    }
-                }
-
-                // 경로 검증
-                let input = dialog.input.clone();
-                if input.trim().is_empty() {
-                    return false;
-                }
-
-                let path = expand_path_string(&input);
-
-                if !path.exists() {
-                    // 존재하지 않는 경로 - 다이얼로그 유지, 하단에 에러 메시지 표시
-                    // 자동완성 목록 숨기기
+        // selection 상태에서의 특수 처리 (모드 분기 이전에 처리)
+        if dialog.selection.is_some() {
+            match code {
+                KeyCode::Char(c) => {
+                    // 선택 범위 삭제 후 새 문자 입력
+                    dialog.input.clear();
+                    dialog.cursor_pos = 0;
+                    dialog.selection = None;
                     if let Some(ref mut completion) = dialog.completion {
                         completion.visible = false;
                         completion.suggestions.clear();
+                        completion.selected_index = 0;
                     }
-                    let error_msg = format!("Path not found: {}", input);
-                    app.show_message(&error_msg);
+
+                    // 새 문자 처리
+                    if c == '~' {
+                        if let Some(home) = dirs::home_dir() {
+                            dialog.input = format!("{}/", home.display());
+                            dialog.cursor_pos = dialog.input.chars().count();
+                            update_path_suggestions(dialog);
+                        }
+                    } else if c == '/' {
+                        dialog.input = "/".to_string();
+                        dialog.cursor_pos = 1;
+                        update_path_suggestions(dialog);
+                    } else {
+                        dialog.input = c.to_string();
+                        dialog.cursor_pos = 1;
+                        // 북마크 모드로 전환됨 - 자동완성 불필요
+                    }
                     return false;
                 }
-
-                if path.is_file() {
-                    // 파일인 경우 - 부모 디렉토리로 이동하고 파일에 커서 위치
-                    if let Some(parent) = path.parent() {
-                        let filename = path.file_name()
-                            .map(|n| n.to_string_lossy().to_string());
-                        app.dialog = None;
-                        app.goto_directory_with_focus(parent, filename);
-                        app.show_message(&format!("Moved to file: {}", path.display()));
-                    }
-                    return false;
-                }
-
-                // 디렉토리인 경우 - 그 디렉토리로 이동
-                app.dialog = None;
-                app.execute_goto(&input);
-                return false;
-            }
-            KeyCode::Esc => {
-                if completion_visible {
-                    // 목록 숨기기
+                KeyCode::Backspace | KeyCode::Delete => {
+                    // 선택 범위 삭제
+                    dialog.input.clear();
+                    dialog.cursor_pos = 0;
+                    dialog.selection = None;
                     if let Some(ref mut completion) = dialog.completion {
                         completion.visible = false;
                         completion.suggestions.clear();
+                        completion.selected_index = 0;
                     }
-                } else {
+                    return false;
+                }
+                KeyCode::Left => {
+                    // 선택 해제, 커서 맨 앞으로
+                    dialog.selection = None;
+                    dialog.cursor_pos = 0;
+                    return false;
+                }
+                KeyCode::Right | KeyCode::End => {
+                    // 선택 해제, 커서 맨 뒤로
+                    dialog.selection = None;
+                    dialog.cursor_pos = dialog.input.chars().count();
+                    return false;
+                }
+                KeyCode::Home => {
+                    // 선택 해제, 커서 맨 앞으로
+                    dialog.selection = None;
+                    dialog.cursor_pos = 0;
+                    return false;
+                }
+                KeyCode::Esc => {
                     // 다이얼로그 닫기
                     app.dialog = None;
+                    return false;
+                }
+                _ => {
+                    // 다른 키는 선택 해제만
+                    dialog.selection = None;
                 }
             }
-            KeyCode::Backspace => {
-                if dialog.cursor_pos > 0 {
-                    let mut chars: Vec<char> = dialog.input.chars().collect();
-                    chars.remove(dialog.cursor_pos - 1);
-                    dialog.input = chars.into_iter().collect();
-                    dialog.cursor_pos -= 1;
-                    // 입력 변경 후 자동완성 목록 업데이트
-                    update_path_suggestions(dialog);
+        }
+
+        // 경로 모드 vs 북마크 모드 결정 (selection 처리 후 재계산)
+        let is_path_mode = dialog.input.starts_with('/') || dialog.input.starts_with('~');
+
+        if is_path_mode {
+            // === 경로 입력 모드: 기존 Go to Path 동작 그대로 ===
+            let completion_visible = dialog
+                .completion
+                .as_ref()
+                .map(|c| c.visible && !c.suggestions.is_empty())
+                .unwrap_or(false);
+
+            match code {
+                KeyCode::Tab => {
+                    if completion_visible {
+                        // 목록에서 선택된 항목으로 완성
+                        let (base_dir, _) = parse_path_for_completion(&dialog.input);
+                        let suggestion = dialog
+                            .completion
+                            .as_ref()
+                            .and_then(|c| c.suggestions.get(c.selected_index).cloned());
+
+                        if let Some(suggestion) = suggestion {
+                            apply_completion(dialog, &base_dir, &suggestion);
+                        }
+                        // 완성 후 새로운 suggestions 업데이트
+                        update_path_suggestions(dialog);
+                    } else {
+                        // 목록이 없으면 자동완성 트리거
+                        trigger_path_completion(dialog);
+                    }
                 }
-            }
-            KeyCode::Delete => {
-                let char_count = dialog.input.chars().count();
-                if dialog.cursor_pos < char_count {
-                    let mut chars: Vec<char> = dialog.input.chars().collect();
-                    chars.remove(dialog.cursor_pos);
-                    dialog.input = chars.into_iter().collect();
-                    update_path_suggestions(dialog);
+                KeyCode::BackTab => {
+                    // Shift+Tab: 이전 항목
+                    if completion_visible {
+                        if let Some(ref mut completion) = dialog.completion {
+                            if !completion.suggestions.is_empty() {
+                                if completion.selected_index == 0 {
+                                    completion.selected_index = completion.suggestions.len() - 1;
+                                } else {
+                                    completion.selected_index -= 1;
+                                }
+                            }
+                        }
+                    }
                 }
-            }
-            KeyCode::Left => {
-                // 완성 이름 시작 위치 계산 (마지막 '/' 다음 위치)
-                let input_chars: Vec<char> = dialog.input.chars().collect();
-                let prefix_start = if dialog.input.ends_with('/') {
-                    input_chars.len()
-                } else {
-                    input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
-                };
-                if dialog.cursor_pos > prefix_start {
-                    dialog.cursor_pos -= 1;
+                KeyCode::Up => {
+                    if completion_visible {
+                        if let Some(ref mut completion) = dialog.completion {
+                            if !completion.suggestions.is_empty() {
+                                if completion.selected_index == 0 {
+                                    completion.selected_index = completion.suggestions.len() - 1;
+                                } else {
+                                    completion.selected_index -= 1;
+                                }
+                            }
+                        }
+                    }
                 }
-            }
-            KeyCode::Right => {
-                if dialog.cursor_pos < dialog.input.chars().count() {
-                    dialog.cursor_pos += 1;
+                KeyCode::Down => {
+                    if completion_visible {
+                        if let Some(ref mut completion) = dialog.completion {
+                            if !completion.suggestions.is_empty() {
+                                completion.selected_index =
+                                    (completion.selected_index + 1) % completion.suggestions.len();
+                            }
+                        }
+                    }
                 }
-            }
-            KeyCode::Home => {
-                // 완성 이름 시작 위치로 이동
-                let input_chars: Vec<char> = dialog.input.chars().collect();
-                let prefix_start = if dialog.input.ends_with('/') {
-                    input_chars.len()
-                } else {
-                    input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
-                };
-                dialog.cursor_pos = prefix_start;
-            }
-            KeyCode::End => {
-                dialog.cursor_pos = dialog.input.chars().count();
-            }
-            KeyCode::Char(c) => {
-                if c == '~' {
-                    // '~' 입력 시 홈 폴더 경로로 설정
-                    if let Some(home) = dirs::home_dir() {
-                        dialog.input = format!("{}/", home.display());
-                        dialog.cursor_pos = dialog.input.chars().count();
+                KeyCode::Enter => {
+                    if completion_visible {
+                        // 선택된 항목으로 완성
+                        let (base_dir, _) = parse_path_for_completion(&dialog.input);
+                        let suggestion = dialog
+                            .completion
+                            .as_ref()
+                            .and_then(|c| c.suggestions.get(c.selected_index).cloned());
+
+                        if let Some(suggestion) = suggestion {
+                            apply_completion(dialog, &base_dir, &suggestion);
+                        }
+                    }
+
+                    // 경로 검증
+                    let input = dialog.input.clone();
+                    if input.trim().is_empty() {
+                        return false;
+                    }
+
+                    let path = expand_path_string(&input);
+
+                    if !path.exists() {
+                        // 존재하지 않는 경로 - 다이얼로그 유지
+                        if let Some(ref mut completion) = dialog.completion {
+                            completion.visible = false;
+                            completion.suggestions.clear();
+                        }
+                        app.show_message(&format!("Path not found: {}", input));
+                        return false;
+                    }
+
+                    if path.is_file() {
+                        // 파일인 경우 - 부모 디렉토리로 이동하고 파일에 커서 위치
+                        if let Some(parent) = path.parent() {
+                            let filename = path.file_name()
+                                .map(|n| n.to_string_lossy().to_string());
+                            app.dialog = None;
+                            app.goto_directory_with_focus(parent, filename);
+                            app.show_message(&format!("Moved to file: {}", path.display()));
+                        }
+                        return false;
+                    }
+
+                    // 디렉토리인 경우 - 그 디렉토리로 이동
+                    app.dialog = None;
+                    app.execute_goto(&input);
+                    return false;
+                }
+                KeyCode::Esc => {
+                    if completion_visible {
+                        // 목록 숨기기
+                        if let Some(ref mut completion) = dialog.completion {
+                            completion.visible = false;
+                            completion.suggestions.clear();
+                        }
+                    } else {
+                        // 다이얼로그 닫기
+                        app.dialog = None;
+                    }
+                }
+                KeyCode::Backspace => {
+                    if dialog.cursor_pos > 0 {
+                        let mut chars: Vec<char> = dialog.input.chars().collect();
+                        chars.remove(dialog.cursor_pos - 1);
+                        dialog.input = chars.into_iter().collect();
+                        dialog.cursor_pos -= 1;
                         update_path_suggestions(dialog);
                     }
-                } else if c == '/' {
-                    // 연속 '/' 입력 방지
-                    let chars: Vec<char> = dialog.input.chars().collect();
-                    let prev_char = if dialog.cursor_pos > 0 {
-                        chars.get(dialog.cursor_pos - 1).copied()
+                }
+                KeyCode::Delete => {
+                    let char_count = dialog.input.chars().count();
+                    if dialog.cursor_pos < char_count {
+                        let mut chars: Vec<char> = dialog.input.chars().collect();
+                        chars.remove(dialog.cursor_pos);
+                        dialog.input = chars.into_iter().collect();
+                        update_path_suggestions(dialog);
+                    }
+                }
+                KeyCode::Left => {
+                    // 완성 이름 시작 위치 계산 (마지막 '/' 다음 위치)
+                    let input_chars: Vec<char> = dialog.input.chars().collect();
+                    let prefix_start = if dialog.input.ends_with('/') {
+                        input_chars.len()
                     } else {
-                        None
+                        input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
                     };
-                    if prev_char != Some('/') {
-                        let mut chars = chars;
+                    if dialog.cursor_pos > prefix_start {
+                        dialog.cursor_pos -= 1;
+                    }
+                }
+                KeyCode::Right => {
+                    if dialog.cursor_pos < dialog.input.chars().count() {
+                        dialog.cursor_pos += 1;
+                    }
+                }
+                KeyCode::Home => {
+                    // 완성 이름 시작 위치로 이동
+                    let input_chars: Vec<char> = dialog.input.chars().collect();
+                    let prefix_start = if dialog.input.ends_with('/') {
+                        input_chars.len()
+                    } else {
+                        input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
+                    };
+                    dialog.cursor_pos = prefix_start;
+                }
+                KeyCode::End => {
+                    dialog.cursor_pos = dialog.input.chars().count();
+                }
+                KeyCode::Char(c) => {
+                    if c == '~' {
+                        // '~' 입력 시 홈 폴더 경로로 설정
+                        if let Some(home) = dirs::home_dir() {
+                            dialog.input = format!("{}/", home.display());
+                            dialog.cursor_pos = dialog.input.chars().count();
+                            update_path_suggestions(dialog);
+                        }
+                    } else if c == '/' {
+                        // 연속 '/' 입력 방지
+                        let chars: Vec<char> = dialog.input.chars().collect();
+                        let prev_char = if dialog.cursor_pos > 0 {
+                            chars.get(dialog.cursor_pos - 1).copied()
+                        } else {
+                            None
+                        };
+                        if prev_char != Some('/') || dialog.input.is_empty() {
+                            let mut chars = chars;
+                            chars.insert(dialog.cursor_pos, c);
+                            dialog.input = chars.into_iter().collect();
+                            dialog.cursor_pos += 1;
+                            update_path_suggestions(dialog);
+                        }
+                    } else {
+                        let mut chars: Vec<char> = dialog.input.chars().collect();
                         chars.insert(dialog.cursor_pos, c);
                         dialog.input = chars.into_iter().collect();
                         dialog.cursor_pos += 1;
                         update_path_suggestions(dialog);
                     }
-                } else {
-                    let mut chars: Vec<char> = dialog.input.chars().collect();
-                    chars.insert(dialog.cursor_pos, c);
-                    dialog.input = chars.into_iter().collect();
-                    dialog.cursor_pos += 1;
-                    // 입력 변경 후 자동완성 목록 업데이트
-                    update_path_suggestions(dialog);
                 }
+                _ => {}
             }
-            _ => {}
+        } else {
+            // === 북마크 검색 모드 ===
+            let filter_lower = dialog.input.to_lowercase();
+            let filtered_bookmarks: Vec<String> = app.settings.bookmarked_path.iter()
+                .filter(|p| {
+                    if filter_lower.is_empty() {
+                        true
+                    } else {
+                        fuzzy_match(&p.to_lowercase(), &filter_lower)
+                    }
+                })
+                .cloned()
+                .collect();
+            let bookmark_count = filtered_bookmarks.len();
+            let has_bookmarks = bookmark_count > 0;
+
+            // 선택 인덱스를 필터링된 목록 크기에 맞게 조정
+            let selected_idx = dialog.completion.as_ref()
+                .map(|c| c.selected_index.min(bookmark_count.saturating_sub(1)))
+                .unwrap_or(0);
+
+            match code {
+                KeyCode::Tab | KeyCode::Enter => {
+                    if has_bookmarks {
+                        // 선택된 북마크로 이동
+                        if let Some(bookmark) = filtered_bookmarks.get(selected_idx) {
+                            let path = PathBuf::from(bookmark);
+                            if path.is_dir() {
+                                app.dialog = None;
+                                app.active_panel_mut().path = path;
+                                app.active_panel_mut().load_files();
+                                app.show_message(&format!("Moved to: {}", bookmark));
+                                return false;
+                            } else {
+                                app.show_message(&format!("Path not found: {}", bookmark));
+                            }
+                        }
+                    }
+                }
+                KeyCode::BackTab | KeyCode::Up => {
+                    if has_bookmarks {
+                        if let Some(ref mut completion) = dialog.completion {
+                            if completion.selected_index == 0 {
+                                completion.selected_index = bookmark_count - 1;
+                            } else {
+                                completion.selected_index -= 1;
+                            }
+                        }
+                    }
+                }
+                KeyCode::Down => {
+                    if has_bookmarks {
+                        if let Some(ref mut completion) = dialog.completion {
+                            completion.selected_index = (completion.selected_index + 1) % bookmark_count;
+                        }
+                    }
+                }
+                KeyCode::Esc => {
+                    app.dialog = None;
+                }
+                KeyCode::Backspace => {
+                    if dialog.cursor_pos > 0 {
+                        let mut chars: Vec<char> = dialog.input.chars().collect();
+                        chars.remove(dialog.cursor_pos - 1);
+                        dialog.input = chars.into_iter().collect();
+                        dialog.cursor_pos -= 1;
+                    }
+                    // 선택 인덱스 리셋
+                    if let Some(ref mut completion) = dialog.completion {
+                        completion.selected_index = 0;
+                    }
+                }
+                KeyCode::Delete => {
+                    let char_count = dialog.input.chars().count();
+                    if dialog.cursor_pos < char_count {
+                        let mut chars: Vec<char> = dialog.input.chars().collect();
+                        chars.remove(dialog.cursor_pos);
+                        dialog.input = chars.into_iter().collect();
+                    }
+                    // 선택 인덱스 리셋
+                    if let Some(ref mut completion) = dialog.completion {
+                        completion.selected_index = 0;
+                    }
+                }
+                KeyCode::Left => {
+                    if dialog.cursor_pos > 0 {
+                        dialog.cursor_pos -= 1;
+                    }
+                }
+                KeyCode::Right => {
+                    if dialog.cursor_pos < dialog.input.chars().count() {
+                        dialog.cursor_pos += 1;
+                    }
+                }
+                KeyCode::Home => {
+                    dialog.cursor_pos = 0;
+                }
+                KeyCode::End => {
+                    dialog.cursor_pos = dialog.input.chars().count();
+                }
+                KeyCode::Char(c) => {
+                    // '/' 또는 '~' 입력 시 경로 모드로 전환
+                    if c == '/' || c == '~' {
+                        if c == '~' {
+                            if let Some(home) = dirs::home_dir() {
+                                dialog.input = format!("{}/", home.display());
+                                dialog.cursor_pos = dialog.input.chars().count();
+                                update_path_suggestions(dialog);
+                            }
+                        } else {
+                            dialog.input = "/".to_string();
+                            dialog.cursor_pos = 1;
+                            update_path_suggestions(dialog);
+                        }
+                    } else {
+                        let mut chars: Vec<char> = dialog.input.chars().collect();
+                        chars.insert(dialog.cursor_pos, c);
+                        dialog.input = chars.into_iter().collect();
+                        dialog.cursor_pos += 1;
+                    }
+                    // 선택 인덱스 리셋
+                    if let Some(ref mut completion) = dialog.completion {
+                        completion.selected_index = 0;
+                    }
+                }
+                _ => {}
+            }
         }
     }
     false

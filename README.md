@@ -230,8 +230,24 @@ Commands are tried in order. If the first command fails, the next one is attempt
 | `Home`/`End` | First / Last item |
 | `PgUp`/`PgDn` | Move 10 lines |
 | `/` | Go to path |
+| `'` | Toggle bookmark |
 | `1` | Go to home directory |
 | `2` | Refresh file list |
+
+### Bookmarks
+
+Quickly navigate to frequently used directories.
+
+| Key | Action |
+|-----|--------|
+| `'` | Toggle bookmark for current directory |
+| `/` | Open Go to path (type to search bookmarks) |
+
+- **Add bookmark**: Press `'` in any directory to bookmark it
+- **Remove bookmark**: Press `'` again in a bookmarked directory
+- **Bookmark indicator**: Bookmarked directories show `✻` marker in panel title
+- **Quick access**: Press `/` and type to fuzzy-search your bookmarks (e.g., "thse" matches "/path/to/base")
+- **Path mode**: In Go to path dialog, type `/` or `~` to switch to path input mode
 
 ### File Operations
 

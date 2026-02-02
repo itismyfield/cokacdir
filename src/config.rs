@@ -72,6 +72,9 @@ pub struct Settings {
     /// {{FILEPATH}} is replaced with the actual file path
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub extension_handler: HashMap<String, Vec<String>>,
+    /// Bookmarked paths for quick navigation
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bookmarked_path: Vec<String>,
 }
 
 fn default_active_panel() -> String {
@@ -87,6 +90,7 @@ impl Default for Settings {
             theme: ThemeSettings::default(),
             tar_path: None,
             extension_handler: HashMap::new(),
+            bookmarked_path: Vec::new(),
         }
     }
 }

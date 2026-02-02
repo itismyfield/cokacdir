@@ -182,6 +182,7 @@ fn build_help_content(theme: &Theme) -> Vec<Line<'static>> {
     lines.push(key_line("1", "Go to home directory"));
     lines.push(key_line("2", "Refresh file list"));
     lines.push(key_line("/", "Go to path dialog"));
+    lines.push(key_line("'", "Toggle bookmark"));
     lines.push(Line::from(""));
 
     // ═══════════════════════════════════════════════════════════════════════
@@ -387,6 +388,32 @@ fn build_help_content(theme: &Theme) -> Vec<Line<'static>> {
         Span::styled("set ", desc_style),
         Span::styled("q", key_highlight_style),
         Span::styled("uit", desc_style),
+    ]));
+    lines.push(Line::from(""));
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // Section: Developer Info
+    // ═══════════════════════════════════════════════════════════════════════
+    lines.push(section("Developer"));
+    lines.push(Line::from(vec![
+        Span::styled("  Developer        ", key_style),
+        Span::styled("cokac (코드깎는노인)", desc_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Email            ", key_style),
+        Span::styled("monogatree@gmail.com", desc_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  Website          ", key_style),
+        Span::styled("https://cokacdir.cokac.com", desc_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  YouTube          ", key_style),
+        Span::styled("https://www.youtube.com/@코드깎는노인", desc_style),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("  코깎노클래스     ", key_style),
+        Span::styled("https://cokac.com/", desc_style),
     ]));
     lines.push(Line::from(""));
 

@@ -508,6 +508,9 @@ fn handle_dual_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
         // Settings dialog - '`'
         KeyCode::Char('`') => app.show_settings_dialog(),
 
+        // Bookmark toggle - '\''
+        KeyCode::Char('\'') => app.toggle_bookmark(),
+
         // macOS: Open current folder in Finder
         #[cfg(target_os = "macos")]
         KeyCode::Char('o') | KeyCode::Char('O') => app.open_in_finder(),

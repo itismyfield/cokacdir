@@ -115,11 +115,17 @@ fn draw_dual_panel(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) 
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
         .split(chunks[0]);
 
+    let left_path_str = app.left_panel.path.display().to_string();
+    let right_path_str = app.right_panel.path.display().to_string();
+    let left_bookmarked = app.settings.bookmarked_path.contains(&left_path_str);
+    let right_bookmarked = app.settings.bookmarked_path.contains(&right_path_str);
+
     panel::draw(
         frame,
         &mut app.left_panel,
         panel_chunks[0],
         app.active_panel == PanelSide::Left && app.dialog.is_none(),
+        left_bookmarked,
         theme,
     );
     panel::draw(
@@ -127,6 +133,7 @@ fn draw_dual_panel(frame: &mut Frame, app: &mut App, area: Rect, theme: &Theme) 
         &mut app.right_panel,
         panel_chunks[1],
         app.active_panel == PanelSide::Right && app.dialog.is_none(),
+        right_bookmarked,
         theme,
     );
 
@@ -220,6 +227,7 @@ fn draw_function_bar(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
         ("p", "roc "),
         ("1", "home "),
         ("2", "ref "),
+        ("'", "mark "),
     ];
 
     // macOS only: open in Finder, open in VS Code

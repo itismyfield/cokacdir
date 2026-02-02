@@ -10,7 +10,9 @@ const shortcutGroups = [
       { key: 'Esc', action: 'Parent directory' },
       { key: 'Tab / ← →', action: 'Switch panels' },
       { key: 'Home / End', action: 'First / Last item' },
-      { key: '/ / 1 / 2', action: 'Go to path / Home / Refresh' },
+      { key: '/', action: 'Go to path / Search bookmarks' },
+      { key: "'", action: 'Toggle bookmark' },
+      { key: '1 / 2', action: 'Home / Refresh' },
     ],
   },
   {
