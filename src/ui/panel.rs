@@ -142,7 +142,14 @@ pub fn draw(frame: &mut Frame, panel: &mut PanelState, area: Rect, is_active: bo
         );
 
         let paragraph = if show_cursor {
-            Paragraph::new(line).style(theme.selected_style())
+            let cursor_bg = if is_marked {
+                theme.panel.marked_text
+            } else if file.is_directory {
+                theme.panel.directory_text
+            } else {
+                theme.panel.file_text
+            };
+            Paragraph::new(line).style(Style::default().bg(cursor_bg))
         } else {
             Paragraph::new(line)
         };
@@ -395,9 +402,18 @@ fn create_file_line(
         String::new()
     };
 
-    // Cursor style is applied at Paragraph level, not here
+    // Cursor style: 배경색을 항목의 원래 글자색으로 설정
     let name_style = if is_cursor {
-        theme.selected_style()
+        let cursor_bg = if is_marked {
+            theme.panel.marked_text
+        } else if file.is_directory {
+            theme.panel.directory_text
+        } else {
+            theme.panel.file_text
+        };
+        Style::default()
+            .fg(theme.panel.selected_text)
+            .bg(cursor_bg)
     } else if is_marked {
         theme.marked_style()
     } else if file.is_directory {
@@ -407,7 +423,16 @@ fn create_file_line(
     };
 
     let other_style = if is_cursor {
-        theme.selected_style()
+        let cursor_bg = if is_marked {
+            theme.panel.marked_text
+        } else if file.is_directory {
+            theme.panel.directory_text
+        } else {
+            theme.panel.file_text
+        };
+        Style::default()
+            .fg(theme.panel.selected_text)
+            .bg(cursor_bg)
     } else {
         theme.dim_style()
     };

@@ -1,6 +1,6 @@
 [package]
 name = "cokacdir"
-version = "0.4.17"
+version = "0.4.18"
 edition = "2021"
 authors = ["cokac <monogatree@gmail.com>"]
 description = "Dual-panel terminal file manager with AI-powered natural language commands"

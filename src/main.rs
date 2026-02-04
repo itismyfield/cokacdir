@@ -569,9 +569,24 @@ fn handle_dual_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
                 app.clipboard_paste();
                 return false;
             }
-            // AI screen - Ctrl+A
+            // Select all - Ctrl+A
             KeyCode::Char('a') => {
-                app.show_ai_screen();
+                app.toggle_all_selection();
+                return false;
+            }
+            _ => {}
+        }
+    }
+
+    // Shift+방향키: 선택하면서 이동
+    if modifiers.contains(KeyModifiers::SHIFT) {
+        match code {
+            KeyCode::Up => {
+                app.move_cursor_with_selection(-1);
+                return false;
+            }
+            KeyCode::Down => {
+                app.move_cursor_with_selection(1);
                 return false;
             }
             _ => {}

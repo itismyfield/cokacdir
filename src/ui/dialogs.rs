@@ -748,8 +748,12 @@ fn draw_simple_input_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, them
         ])
     };
 
-    // Tar 다이얼로그의 경우 파일 목록 표시
-    if dialog.dialog_type == DialogType::Tar && !dialog.message.is_empty() {
+    // Tar/Mkdir/Rename 다이얼로그의 경우 메시지 표시 (에러 메시지 포함)
+    if (dialog.dialog_type == DialogType::Tar
+        || dialog.dialog_type == DialogType::Mkdir
+        || dialog.dialog_type == DialogType::Rename)
+        && !dialog.message.is_empty()
+    {
         let message_y = inner.y;
         let message_area = Rect::new(inner.x + 1, message_y, inner.width - 2, 1);
         // Use warning style for error messages (ending with !)
@@ -2143,6 +2147,18 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
 
                         // For Rename dialog, check if target file already exists
                         if dialog_type == DialogType::Rename && !input.trim().is_empty() {
+                            let current_path = app.active_panel().path.clone();
+                            let new_path = current_path.join(&input);
+                            if new_path.exists() {
+                                if let Some(ref mut d) = app.dialog {
+                                    d.message = format!("'{}' already exists!", input);
+                                }
+                                return false;
+                            }
+                        }
+
+                        // For Mkdir dialog, check if directory already exists
+                        if dialog_type == DialogType::Mkdir && !input.trim().is_empty() {
                             let current_path = app.active_panel().path.clone();
                             let new_path = current_path.join(&input);
                             if new_path.exists() {

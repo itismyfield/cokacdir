@@ -1237,6 +1237,37 @@ impl App {
         }
     }
 
+    /// Shift+방향키: 현재 항목 토글 후 커서 이동
+    pub fn move_cursor_with_selection(&mut self, delta: i32) {
+        let panel = self.active_panel_mut();
+
+        // 이동할 새 인덱스 계산
+        let new_index = (panel.selected_index as i32 + delta)
+            .max(0)
+            .min(panel.files.len().saturating_sub(1) as i32)
+            as usize;
+
+        // 이동하지 않는 경우 (이미 맨 위나 맨 아래)
+        if new_index == panel.selected_index {
+            return;
+        }
+
+        // 현재 항목 토글 (".." 제외)
+        if let Some(file) = panel.files.get(panel.selected_index) {
+            if file.name != ".." {
+                let name = file.name.clone();
+                if panel.selected_files.contains(&name) {
+                    panel.selected_files.remove(&name);
+                } else {
+                    panel.selected_files.insert(name);
+                }
+            }
+        }
+
+        // 커서 이동
+        panel.selected_index = new_index;
+    }
+
     pub fn enter_selected(&mut self) {
         let panel = self.active_panel_mut();
         if let Some(file) = panel.current_file().cloned() {
