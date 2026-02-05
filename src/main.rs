@@ -354,20 +354,14 @@ fn run_app<B: ratatui::backend::Backend>(
         };
 
         // Poll for AI responses if on AI screen or AI mode (panel)
-        let mut ai_response_completed = false;
         if app.current_screen == Screen::AIScreen || app.is_ai_mode() {
             if let Some(ref mut state) = app.ai_state {
-                let was_processing = state.is_processing;
-                state.poll_response();
-                // AI 응답 완료 감지
-                if was_processing && !state.is_processing {
-                    ai_response_completed = true;
+                // poll_response()가 true를 반환하면 새 내용이 추가된 것
+                let has_new_content = state.poll_response();
+                if has_new_content {
+                    app.refresh_panels();
                 }
             }
-        }
-        // AI 응답 완료 시 패널 새로고침 (파일 변경 반영)
-        if ai_response_completed {
-            app.refresh_panels();
         }
 
         // Poll for file info calculation if on FileInfo screen

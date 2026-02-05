@@ -643,7 +643,7 @@ Keep responses concise and terminal-friendly.",
     }
 
     /// Poll for streaming response from Claude
-    /// Returns true if still processing, false if done or no request pending
+    /// Returns true if new content was added to history, false otherwise
     pub fn poll_response(&mut self) -> bool {
         if !self.is_processing {
             return false;
@@ -651,6 +651,7 @@ Keep responses concise and terminal-friendly.",
 
         // Collect messages first to avoid borrow conflicts
         let mut messages = Vec::new();
+        let mut has_new_content = false;
         let mut channel_disconnected = false;
 
         if let Some(ref receiver) = self.response_receiver {
@@ -688,6 +689,7 @@ Keep responses concise and terminal-friendly.",
                     // Accumulate text in streaming buffer
                     self.streaming_buffer.push_str(&content);
                     self.update_streaming_history();
+                    has_new_content = true;
                 }
                 StreamMessage::ToolUse { name, input } => {
                     debug_log(&format!("Processing ToolUse: {}", name));
@@ -696,6 +698,7 @@ Keep responses concise and terminal-friendly.",
                         item_type: HistoryType::ToolUse,
                         content: format!("{}\n{}", name, input),
                     });
+                    has_new_content = true;
                 }
                 StreamMessage::ToolResult { content, is_error } => {
                     debug_log(&format!("Processing ToolResult: {} chars, is_error={}", content.len(), is_error));
@@ -711,6 +714,7 @@ Keep responses concise and terminal-friendly.",
                         item_type: if is_error { HistoryType::Error } else { HistoryType::ToolResult },
                         content: display_content,
                     });
+                    has_new_content = true;
                 }
                 StreamMessage::Done { result, session_id } => {
                     debug_log(&format!("Processing Done: result={} chars, session_id={:?}", result.len(), session_id));
@@ -722,8 +726,8 @@ Keep responses concise and terminal-friendly.",
                     self.finalize_streaming_history(&result);
                     self.is_processing = false;
                     self.response_receiver = None;
-                    debug_log("Done processing complete, returning false");
-                    return false;
+                    debug_log("Done processing complete, returning true for final refresh");
+                    return true;
                 }
                 StreamMessage::Error { message } => {
                     debug_log(&format!("Processing Error: {}", message));
@@ -733,7 +737,7 @@ Keep responses concise and terminal-friendly.",
                     });
                     self.is_processing = false;
                     self.response_receiver = None;
-                    return false;
+                    return true;
                 }
             }
 
@@ -756,10 +760,10 @@ Keep responses concise and terminal-friendly.",
             }
             self.is_processing = false;
             self.response_receiver = None;
-            return false;
+            return true;
         }
 
-        self.is_processing
+        has_new_content
     }
 
     /// Update streaming history with current buffer content
