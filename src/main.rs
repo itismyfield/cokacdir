@@ -537,11 +537,22 @@ fn run_app<B: ratatui::backend::Backend>(
                     }
                 }
                 Event::Paste(text) => {
-                    // Handle paste event for AI screen
-                    if let Screen::AIScreen = app.current_screen {
-                        if let Some(ref mut state) = app.ai_state {
-                            ui::ai_screen::handle_paste(state, &text);
+                    // Handle paste event for AI input
+                    match app.current_screen {
+                        Screen::AIScreen => {
+                            if let Some(ref mut state) = app.ai_state {
+                                ui::ai_screen::handle_paste(state, &text);
+                            }
                         }
+                        Screen::DualPanel => {
+                            // AI mode with focus on AI panel
+                            if app.is_ai_mode() && app.ai_panel_side == Some(app.active_panel) {
+                                if let Some(ref mut state) = app.ai_state {
+                                    ui::ai_screen::handle_paste(state, &text);
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 }
                 _ => {}
