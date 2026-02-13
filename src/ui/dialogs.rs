@@ -356,6 +356,10 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
         }
     };
 
+    // 다이얼로그 크기가 터미널 크기를 초과하지 않도록 제한
+    let width = width.min(area.width);
+    let height = height.min(area.height);
+    let max_height = max_height.min(area.height);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     // Y좌표는 항상 최대 높이 기준으로 계산 (절대 고정)
     let y = area.y + (area.height.saturating_sub(max_height)) / 2;
