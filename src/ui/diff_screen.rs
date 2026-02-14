@@ -54,6 +54,8 @@ pub struct DiffEntry {
     pub status: DiffStatus,
     pub is_directory: bool,
     pub depth: usize,
+    /// true if this is a one-side-only directory whose children have not been loaded yet
+    pub children_not_loaded: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -437,6 +439,12 @@ impl DiffState {
                 // Remember the all_entries index of the current entry to restore cursor position
                 let current_all_idx = self.filtered_indices.get(self.selected_index).copied();
                 if self.collapsed_dirs.contains(&path) {
+                    // Expanding: lazy-load children if needed
+                    if let Some(all_idx) = current_all_idx {
+                        if self.all_entries[all_idx].children_not_loaded {
+                            self.lazy_load_children(all_idx);
+                        }
+                    }
                     self.collapsed_dirs.remove(&path);
                 } else {
                     // When collapsing, also collapse all descendant directories
@@ -479,6 +487,12 @@ impl DiffState {
             if entry.is_directory && self.collapsed_dirs.contains(&entry.relative_path) {
                 let path = entry.relative_path.clone();
                 let current_all_idx = self.filtered_indices.get(self.selected_index).copied();
+                // Lazy-load children if needed
+                if let Some(all_idx) = current_all_idx {
+                    if self.all_entries[all_idx].children_not_loaded {
+                        self.lazy_load_children(all_idx);
+                    }
+                }
                 self.collapsed_dirs.remove(&path);
                 self.apply_filter();
                 if let Some(all_idx) = current_all_idx {
@@ -542,6 +556,10 @@ impl DiffState {
             if entry.is_directory {
                 let path = entry.relative_path.clone();
                 let current_all_idx = self.filtered_indices.get(self.selected_index).copied();
+                // Lazy-load this directory and all descendants recursively
+                if let Some(all_idx) = current_all_idx {
+                    self.lazy_load_all_descendants(all_idx);
+                }
                 // Remove this directory and all descendants from collapsed_dirs
                 let prefix = format!("{}/", path);
                 self.collapsed_dirs.remove(&path);
@@ -607,6 +625,105 @@ impl DiffState {
                     }
                 }
             }
+        }
+    }
+
+    /// Lazily load children for a one-side-only directory that hasn't been expanded yet.
+    /// Inserts child entries right after the directory entry in all_entries.
+    fn lazy_load_children(&mut self, all_entry_idx: usize) {
+        let entry = &self.all_entries[all_entry_idx];
+        if !entry.children_not_loaded || !entry.is_directory {
+            return;
+        }
+
+        let is_left = entry.status == DiffStatus::LeftOnly;
+        let root = if is_left {
+            self.left_root.clone()
+        } else {
+            self.right_root.clone()
+        };
+        let relative_path = entry.relative_path.clone();
+        let parent_depth = entry.depth;
+
+        // Load one level of children
+        let dir_path = root.join(&relative_path);
+        let names = read_dir_names(&dir_path);
+
+        let mut sorted_names = names;
+        sort_names_one_side(&mut sorted_names, &dir_path);
+
+        let mut children = Vec::new();
+        for name in &sorted_names {
+            let child_relative = format!("{}/{}", relative_path, name);
+            let full_path = dir_path.join(name);
+            let info = make_file_info(&full_path, name);
+            let is_dir = info.as_ref().map_or(false, |i| i.is_directory);
+            let status = if is_left {
+                DiffStatus::LeftOnly
+            } else {
+                DiffStatus::RightOnly
+            };
+
+            let (left, right) = if is_left {
+                (info, None)
+            } else {
+                (None, info)
+            };
+
+            children.push(DiffEntry {
+                relative_path: child_relative,
+                left,
+                right,
+                status,
+                is_directory: is_dir,
+                depth: parent_depth + 1,
+                children_not_loaded: is_dir,
+            });
+        }
+
+        // Mark as loaded
+        self.all_entries[all_entry_idx].children_not_loaded = false;
+
+        // Insert children right after the parent entry
+        let insert_pos = all_entry_idx + 1;
+        // Update filtered_indices: shift indices >= insert_pos by children.len()
+        let count = children.len();
+        if count > 0 {
+            for idx in self.filtered_indices.iter_mut() {
+                if *idx >= insert_pos {
+                    *idx += count;
+                }
+            }
+            // Splice children into all_entries
+            self.all_entries.splice(insert_pos..insert_pos, children);
+            // Collapse newly loaded child directories by default
+            for i in insert_pos..insert_pos + count {
+                if self.all_entries[i].is_directory {
+                    self.collapsed_dirs.insert(self.all_entries[i].relative_path.clone());
+                }
+            }
+        }
+    }
+
+    /// Recursively lazy-load all descendants of a directory
+    fn lazy_load_all_descendants(&mut self, all_entry_idx: usize) {
+        if self.all_entries[all_entry_idx].children_not_loaded {
+            self.lazy_load_children(all_entry_idx);
+        }
+        // Now iterate over children and recursively load their descendants
+        let parent_path = self.all_entries[all_entry_idx].relative_path.clone();
+        let parent_depth = self.all_entries[all_entry_idx].depth;
+        let prefix = format!("{}/", parent_path);
+        // Find direct children that are directories (depth == parent_depth + 1)
+        let mut i = all_entry_idx + 1;
+        while i < self.all_entries.len() {
+            if !self.all_entries[i].relative_path.starts_with(&prefix) {
+                break;
+            }
+            if self.all_entries[i].is_directory && self.all_entries[i].depth == parent_depth + 1 {
+                self.lazy_load_all_descendants(i);
+            }
+            i += 1;
         }
     }
 
@@ -767,6 +884,7 @@ fn build_recursive(
                     status: DiffStatus::DirSame, // Temporary, will be updated
                     is_directory: true,
                     depth,
+                    children_not_loaded: false,
                 });
 
                 build_recursive(
@@ -813,6 +931,7 @@ fn build_recursive(
                     },
                     is_directory: false,
                     depth,
+                    children_not_loaded: false,
                 });
             } else {
                 // One is dir, one is file - treat as modified (type mismatch)
@@ -823,113 +942,35 @@ fn build_recursive(
                     status: DiffStatus::Modified,
                     is_directory,
                     depth,
+                    children_not_loaded: false,
                 });
             }
         } else if left_exists {
-            // Left only
+            // Left only - skip recursion, children loaded lazily on expand
             entries.push(DiffEntry {
-                relative_path: child_relative.clone(),
+                relative_path: child_relative,
                 left: left_info,
                 right: None,
                 status: DiffStatus::LeftOnly,
                 is_directory,
                 depth,
+                children_not_loaded: is_directory,
             });
-
-            // Recurse into left-only directories
-            if left_is_dir {
-                build_one_side_recursive(
-                    left_root,
-                    &child_relative,
-                    depth + 1,
-                    true,
-                    sort_by,
-                    sort_order,
-                    entries,
-                );
-            }
         } else {
-            // Right only
+            // Right only - skip recursion, children loaded lazily on expand
             entries.push(DiffEntry {
-                relative_path: child_relative.clone(),
+                relative_path: child_relative,
                 left: None,
                 right: right_info,
                 status: DiffStatus::RightOnly,
                 is_directory,
                 depth,
+                children_not_loaded: is_directory,
             });
-
-            // Recurse into right-only directories
-            if right_is_dir {
-                build_one_side_recursive(
-                    right_root,
-                    &child_relative,
-                    depth + 1,
-                    false,
-                    sort_by,
-                    sort_order,
-                    entries,
-                );
-            }
         }
     }
 }
 
-/// Recurse into a directory that exists on only one side
-fn build_one_side_recursive(
-    root: &Path,
-    relative_path: &str,
-    depth: usize,
-    is_left: bool,
-    sort_by: SortBy,
-    sort_order: SortOrder,
-    entries: &mut Vec<DiffEntry>,
-) {
-    let dir_path = root.join(relative_path);
-    let names = read_dir_names(&dir_path);
-
-    let mut sorted_names = names;
-    sort_names_single_dir(&mut sorted_names, &dir_path, sort_by, sort_order);
-
-    for name in &sorted_names {
-        let child_relative = format!("{}/{}", relative_path, name);
-        let full_path = dir_path.join(name);
-        let info = make_file_info(&full_path, name);
-        let is_dir = info.as_ref().map_or(false, |i| i.is_directory);
-        let status = if is_left {
-            DiffStatus::LeftOnly
-        } else {
-            DiffStatus::RightOnly
-        };
-
-        let (left, right) = if is_left {
-            (info, None)
-        } else {
-            (None, info)
-        };
-
-        entries.push(DiffEntry {
-            relative_path: child_relative.clone(),
-            left,
-            right,
-            status,
-            is_directory: is_dir,
-            depth,
-        });
-
-        if is_dir {
-            build_one_side_recursive(
-                root,
-                &child_relative,
-                depth + 1,
-                is_left,
-                sort_by,
-                sort_order,
-                entries,
-            );
-        }
-    }
-}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Threaded diff builders (async with cancel + progress)
@@ -1004,48 +1045,10 @@ fn count_entries_recursive(
             if left_is_dir && right_is_dir {
                 count += count_entries_recursive(left_root, right_root, &child_relative, cancel_flag, progress_tx, running_count);
             }
-        } else if left_exists {
-            if is_dir_via_info(&left_dir.join(name)) {
-                count += count_one_side_recursive(left_root, &child_relative, cancel_flag, progress_tx, running_count);
-            }
-        } else {
-            if is_dir_via_info(&right_dir.join(name)) {
-                count += count_one_side_recursive(right_root, &child_relative, cancel_flag, progress_tx, running_count);
-            }
         }
+        // One-side-only directories: no recursion needed, just count the directory itself
     }
 
-    count
-}
-
-/// Count entries in a single-side directory tree
-fn count_one_side_recursive(
-    root: &Path,
-    relative_path: &str,
-    cancel_flag: &AtomicBool,
-    progress_tx: &Sender<DiffProgressMsg>,
-    running_count: &Arc<std::sync::atomic::AtomicUsize>,
-) -> usize {
-    if cancel_flag.load(Ordering::Relaxed) {
-        return 0;
-    }
-    let dir_path = root.join(relative_path);
-    let names = read_dir_names(&dir_path);
-
-    let added = names.len();
-    let new_total = running_count.fetch_add(added, Ordering::Relaxed) + added;
-    let _ = progress_tx.send(DiffProgressMsg::Counting(new_total));
-
-    let mut count = added;
-    for name in &names {
-        if cancel_flag.load(Ordering::Relaxed) {
-            return count;
-        }
-        let child = format!("{}/{}", relative_path, name);
-        if is_dir_via_info(&dir_path.join(name)) {
-            count += count_one_side_recursive(root, &child, cancel_flag, progress_tx, running_count);
-        }
-    }
     count
 }
 
@@ -1144,6 +1147,7 @@ fn build_recursive_threaded(
                     status: DiffStatus::DirSame,
                     is_directory: true,
                     depth,
+                    children_not_loaded: false,
                 });
 
                 build_recursive_threaded(
@@ -1192,6 +1196,7 @@ fn build_recursive_threaded(
                     },
                     is_directory: false,
                     depth,
+                    children_not_loaded: false,
                 });
             } else {
                 entries.push(DiffEntry {
@@ -1201,134 +1206,31 @@ fn build_recursive_threaded(
                     status: DiffStatus::Modified,
                     is_directory,
                     depth,
+                    children_not_loaded: false,
                 });
             }
         } else if left_exists {
+            // Left only - skip recursion, children loaded lazily on expand
             entries.push(DiffEntry {
-                relative_path: child_relative.clone(),
+                relative_path: child_relative,
                 left: left_info,
                 right: None,
                 status: DiffStatus::LeftOnly,
                 is_directory,
                 depth,
+                children_not_loaded: is_directory,
             });
-
-            if left_is_dir {
-                build_one_side_recursive_threaded(
-                    left_root,
-                    &child_relative,
-                    depth + 1,
-                    true,
-                    sort_by,
-                    sort_order,
-                    entries,
-                    cancel_flag,
-                    progress_tx,
-                    total,
-                    counter,
-                );
-            }
         } else {
+            // Right only - skip recursion, children loaded lazily on expand
             entries.push(DiffEntry {
-                relative_path: child_relative.clone(),
+                relative_path: child_relative,
                 left: None,
                 right: right_info,
                 status: DiffStatus::RightOnly,
                 is_directory,
                 depth,
+                children_not_loaded: is_directory,
             });
-
-            if right_is_dir {
-                build_one_side_recursive_threaded(
-                    right_root,
-                    &child_relative,
-                    depth + 1,
-                    false,
-                    sort_by,
-                    sort_order,
-                    entries,
-                    cancel_flag,
-                    progress_tx,
-                    total,
-                    counter,
-                );
-            }
-        }
-    }
-}
-
-/// Threaded version of build_one_side_recursive
-fn build_one_side_recursive_threaded(
-    root: &Path,
-    relative_path: &str,
-    depth: usize,
-    is_left: bool,
-    sort_by: SortBy,
-    sort_order: SortOrder,
-    entries: &mut Vec<DiffEntry>,
-    cancel_flag: &AtomicBool,
-    progress_tx: &Sender<DiffProgressMsg>,
-    total: usize,
-    counter: &Arc<std::sync::atomic::AtomicUsize>,
-) {
-    if cancel_flag.load(Ordering::Relaxed) {
-        return;
-    }
-
-    let dir_path = root.join(relative_path);
-    let names = read_dir_names(&dir_path);
-
-    let mut sorted_names = names;
-    sort_names_single_dir(&mut sorted_names, &dir_path, sort_by, sort_order);
-
-    for name in &sorted_names {
-        if cancel_flag.load(Ordering::Relaxed) {
-            return;
-        }
-
-        let child_relative = format!("{}/{}", relative_path, name);
-        let full_path = dir_path.join(name);
-        let info = make_file_info(&full_path, name);
-        let is_dir = info.as_ref().map_or(false, |i| i.is_directory);
-        let status = if is_left {
-            DiffStatus::LeftOnly
-        } else {
-            DiffStatus::RightOnly
-        };
-
-        let (left, right) = if is_left {
-            (info, None)
-        } else {
-            (None, info)
-        };
-
-        // Send progress
-        let count = counter.fetch_add(1, Ordering::Relaxed) + 1;
-        let _ = progress_tx.send(DiffProgressMsg::Comparing(child_relative.clone(), count, total));
-
-        entries.push(DiffEntry {
-            relative_path: child_relative.clone(),
-            left,
-            right,
-            status,
-            is_directory: is_dir,
-            depth,
-        });
-
-        if is_dir {
-            build_one_side_recursive_threaded(
-                root,
-                &child_relative,
-                depth + 1,
-                is_left,
-                sort_by,
-                sort_order,
-                entries,
-                cancel_flag,
-                progress_tx,
-                total,
-                counter,
-            );
         }
     }
 }
@@ -1336,6 +1238,19 @@ fn build_one_side_recursive_threaded(
 // ═══════════════════════════════════════════════════════════════════════════════
 // Helper functions
 // ═══════════════════════════════════════════════════════════════════════════════
+
+/// Sort names for lazy-loaded one-side directories (directories first, then by name)
+fn sort_names_one_side(names: &mut Vec<String>, dir: &Path) {
+    names.sort_by(|a, b| {
+        let a_is_dir = dir.join(a).is_dir();
+        let b_is_dir = dir.join(b).is_dir();
+        match (a_is_dir, b_is_dir) {
+            (true, false) => std::cmp::Ordering::Less,
+            (false, true) => std::cmp::Ordering::Greater,
+            _ => a.to_lowercase().cmp(&b.to_lowercase()),
+        }
+    });
+}
 
 /// Read directory entry names, returning an empty vec on failure
 fn read_dir_names(dir: &Path) -> Vec<String> {
@@ -1423,54 +1338,7 @@ fn sort_names(
     });
 }
 
-/// Sort names for a single directory
-fn sort_names_single_dir(
-    names: &mut Vec<String>,
-    dir: &Path,
-    sort_by: SortBy,
-    sort_order: SortOrder,
-) {
-    names.sort_by(|a, b| {
-        let a_path = dir.join(a);
-        let b_path = dir.join(b);
-        let a_is_dir = a_path.is_dir();
-        let b_is_dir = b_path.is_dir();
 
-        match (a_is_dir, b_is_dir) {
-            (true, false) => return std::cmp::Ordering::Less,
-            (false, true) => return std::cmp::Ordering::Greater,
-            _ => {}
-        }
-
-        let ord = match sort_by {
-            SortBy::Name => a.to_lowercase().cmp(&b.to_lowercase()),
-            SortBy::Size => {
-                let a_size = fs::metadata(&a_path).map(|m| m.len()).unwrap_or(0);
-                let b_size = fs::metadata(&b_path).map(|m| m.len()).unwrap_or(0);
-                a_size.cmp(&b_size)
-            }
-            SortBy::Modified => {
-                let a_mod = fs::metadata(&a_path)
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                let b_mod = fs::metadata(&b_path)
-                    .and_then(|m| m.modified())
-                    .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                a_mod.cmp(&b_mod)
-            }
-            SortBy::Type => {
-                let a_ext = get_extension(a);
-                let b_ext = get_extension(b);
-                a_ext.cmp(&b_ext).then_with(|| a.to_lowercase().cmp(&b.to_lowercase()))
-            }
-        };
-
-        match sort_order {
-            SortOrder::Asc => ord,
-            SortOrder::Desc => ord.reverse(),
-        }
-    });
-}
 
 fn is_name_dir(
     name: &str,

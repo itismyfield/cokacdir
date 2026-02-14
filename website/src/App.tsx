@@ -1,22 +1,13 @@
-import Hero from './components/Hero'
-import PowerStrip from './components/PowerStrip'
-import AIShowcase from './components/AIShowcase'
-import Features from './components/Features'
-import AllInOne from './components/AllInOne'
-import Installation from './components/Installation'
-import Footer from './components/Footer'
+import { Routes, Route } from 'react-router-dom'
+import LandingPage from './pages/LandingPage'
+import TutorialPage from './components/tutorial/TutorialPage'
 
 function App() {
   return (
-    <div className="min-h-screen bg-bg-dark">
-      <Hero />
-      <PowerStrip />
-      <AIShowcase />
-      <Features />
-      <AllInOne />
-      <Installation />
-      <Footer />
-    </div>
+    <Routes>
+      <Route path="/" element={<LandingPage />} />
+      <Route path="/tutorial" element={<TutorialPage />} />
+    </Routes>
   )
 }
 

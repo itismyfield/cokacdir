@@ -1,5 +1,6 @@
 import { motion } from 'framer-motion'
-import { Github, Terminal } from 'lucide-react'
+import { Github, Terminal, BookOpen } from 'lucide-react'
+import { Link } from 'react-router-dom'
 import Button from './ui/Button'
 import TerminalPreview from './TerminalPreview'
 
@@ -75,6 +76,13 @@ export default function Hero() {
             <Github className="w-5 h-5" />
             View on GitHub
           </Button>
+          <Link
+            to="/tutorial"
+            className="inline-flex items-center gap-2 px-6 py-3 rounded-lg bg-accent-cyan/10 border border-accent-cyan/30 text-accent-cyan font-semibold hover:bg-accent-cyan/20 hover:border-accent-cyan/50 transition-all duration-200"
+          >
+            <BookOpen className="w-5 h-5" />
+            Beginner Tutorial
+          </Link>
         </motion.div>
 
         {/* Terminal preview */}

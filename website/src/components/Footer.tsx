@@ -1,4 +1,5 @@
-import { Github, FileText, Cpu, BookOpen } from 'lucide-react'
+import { Github, FileText, Cpu, BookOpen, GraduationCap } from 'lucide-react'
+import { Link } from 'react-router-dom'
 
 export default function Footer() {
   return (
@@ -26,6 +27,13 @@ export default function Footer() {
               <Cpu className="w-5 h-5" />
               <span className="text-sm">Built with Rust</span>
             </span>
+            <Link
+              to="/tutorial"
+              className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors"
+            >
+              <GraduationCap className="w-5 h-5" />
+              <span className="text-sm">Tutorial</span>
+            </Link>
             <a
               href="https://github.com/kstost/cokacdir#readme"
               target="_blank"

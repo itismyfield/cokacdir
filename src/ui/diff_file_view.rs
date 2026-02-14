@@ -40,13 +40,15 @@ pub struct DiffFileViewState {
     pub left_path: PathBuf,
     pub right_path: PathBuf,
     pub diff_lines: Vec<DiffLine>,
-    pub scroll: usize,
+    pub scroll: usize,            // visual row offset (0-based)
     pub visible_height: usize,
     pub left_total_lines: usize,
     pub right_total_lines: usize,
     pub change_positions: Vec<usize>,
     pub current_change: usize,
     pub file_name: String,
+    pub max_scroll: usize,        // max visual row offset
+    pub change_visual_offsets: Vec<usize>, // visual row offset for each change_positions entry
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -290,6 +292,8 @@ impl DiffFileViewState {
                 change_positions: Vec::new(),
                 current_change: 0,
                 file_name,
+                max_scroll: 0,
+                change_visual_offsets: Vec::new(),
             };
         }
 
@@ -365,6 +369,8 @@ impl DiffFileViewState {
             change_positions,
             current_change: 0,
             file_name,
+            max_scroll: 0,
+            change_visual_offsets: Vec::new(),
         }
     }
 }
@@ -424,26 +430,90 @@ pub fn draw(frame: &mut Frame, state: &mut DiffFileViewState, area: Rect, theme:
     let left_inner_width = (left_area.width as usize).saturating_sub(1);
 
     let visible_lines = state.visible_height;
-    let total_lines = state.diff_lines.len();
-
-    // Clamp scroll
-    if total_lines > visible_lines {
-        if state.scroll > total_lines - visible_lines {
-            state.scroll = total_lines - visible_lines;
-        }
-    } else {
-        state.scroll = 0;
-    }
-
-    let end = (state.scroll + visible_lines).min(total_lines);
-    let visible_slice = &state.diff_lines[state.scroll..end];
+    let total_logical = state.diff_lines.len();
 
     // Line number width: marker(1) + digits + separator(│)
     let max_line = state.left_total_lines.max(state.right_total_lines).max(1);
     let digit_width = ((max_line as f64).log10().floor() as usize) + 1;
     let line_no_width = 1 + digit_width; // 1 for marker + digits
 
-    // Build left and right lines
+    let left_content_width = left_inner_width.saturating_sub(line_no_width + 1);
+    let right_content_width = (right_area.width as usize).saturating_sub(line_no_width + 1);
+    // Reserve 1 column on the right panel for the scrollbar (VerticalRight overlaps right_area).
+    // Use the narrower width for wrapping so both sides break at the same position.
+    let wrap_width = left_content_width.min(right_content_width.saturating_sub(1));
+
+    // Compute visual row count for each logical line and cumulative offsets
+    // visual_row_offsets[i] = total visual rows before logical line i
+    let mut visual_row_offsets: Vec<usize> = Vec::with_capacity(total_logical + 1);
+    let mut total_visual_rows: usize = 0;
+    for dl in &state.diff_lines {
+        visual_row_offsets.push(total_visual_rows);
+        let visual_rows = if dl.line_status == DiffLineStatus::Modified {
+            let lc = dl.left_content.as_deref().unwrap_or("");
+            let rc = dl.right_content.as_deref().unwrap_or("");
+            let left_exp = expand_chars(lc);
+            let right_exp = expand_chars(rc);
+            let max_len = left_exp.len().max(right_exp.len());
+            count_inline_wrapped_rows(&left_exp, max_len, wrap_width)
+                .max(count_inline_wrapped_rows(&right_exp, max_len, wrap_width))
+        } else {
+            let left_rows = match &dl.left_content {
+                Some(c) if dl.line_status != DiffLineStatus::RightOnly => {
+                    count_wrapped_lines(c, wrap_width)
+                }
+                _ => 1,
+            };
+            let right_rows = match &dl.right_content {
+                Some(c) if dl.line_status != DiffLineStatus::LeftOnly => {
+                    count_wrapped_lines(c, wrap_width)
+                }
+                _ => 1,
+            };
+            left_rows.max(right_rows)
+        };
+        total_visual_rows += visual_rows;
+    }
+    visual_row_offsets.push(total_visual_rows);
+
+    // scroll is now a visual row offset; max_scroll = total - visible
+    state.max_scroll = total_visual_rows.saturating_sub(visible_lines);
+
+    // Compute change_visual_offsets for n/p navigation
+    state.change_visual_offsets = state.change_positions.iter().map(|&pos| {
+        if pos < visual_row_offsets.len() {
+            visual_row_offsets[pos]
+        } else {
+            0
+        }
+    }).collect();
+
+    // Clamp scroll
+    if state.scroll > state.max_scroll {
+        state.scroll = state.max_scroll;
+    }
+
+    // Convert visual scroll position to logical line + skip_rows
+    // Find the logical line that contains visual row state.scroll
+    let start_logical = if total_logical == 0 {
+        0
+    } else {
+        // Binary search: find largest i where visual_row_offsets[i] <= state.scroll
+        let mut lo = 0usize;
+        let mut hi = total_logical.saturating_sub(1);
+        while lo < hi {
+            let mid = lo + (hi - lo + 1) / 2;
+            if visual_row_offsets[mid] <= state.scroll {
+                lo = mid;
+            } else {
+                hi = mid - 1;
+            }
+        }
+        lo
+    };
+    let skip_rows = state.scroll.saturating_sub(visual_row_offsets[start_logical]);
+
+    // Build left and right display lines
     let mut left_lines_display: Vec<Line> = Vec::with_capacity(visible_lines);
     let mut right_lines_display: Vec<Line> = Vec::with_capacity(visible_lines);
 
@@ -453,17 +523,35 @@ pub fn draw(frame: &mut Frame, state: &mut DiffFileViewState, area: Rect, theme:
         None
     };
 
-    for (i, diff_line) in visible_slice.iter().enumerate() {
-        let absolute_idx = state.scroll + i;
-        let is_current_change = current_change_pos == Some(absolute_idx);
-        let (left_spans, right_spans) =
-            render_diff_line(diff_line, line_no_width, left_inner_width, right_area.width as usize, theme, is_current_change);
-        left_lines_display.push(Line::from(left_spans));
-        right_lines_display.push(Line::from(right_spans));
+    let mut visual_rows_filled = 0usize;
+    let mut logical_idx = start_logical;
+    let mut first_line = true;
+
+    while visual_rows_filled < visible_lines && logical_idx < total_logical {
+        let diff_line = &state.diff_lines[logical_idx];
+        let is_current_change = current_change_pos == Some(logical_idx);
+        let rows = render_diff_line(
+            diff_line, line_no_width, left_inner_width,
+            right_area.width as usize, wrap_width, theme, is_current_change,
+        );
+        let rows_to_skip = if first_line { skip_rows } else { 0 };
+        first_line = false;
+        for (row_idx, (left_spans, right_spans)) in rows.into_iter().enumerate() {
+            if row_idx < rows_to_skip {
+                continue;
+            }
+            if visual_rows_filled >= visible_lines {
+                break;
+            }
+            left_lines_display.push(Line::from(left_spans));
+            right_lines_display.push(Line::from(right_spans));
+            visual_rows_filled += 1;
+        }
+        logical_idx += 1;
     }
 
     // Fill remaining lines with empty bg
-    for _ in visible_slice.len()..visible_lines {
+    while visual_rows_filled < visible_lines {
         left_lines_display.push(Line::from(Span::styled(
             " ".repeat(left_inner_width),
             Style::default().bg(theme.diff_file_view.bg),
@@ -472,6 +560,7 @@ pub fn draw(frame: &mut Frame, state: &mut DiffFileViewState, area: Rect, theme:
             " ".repeat(right_area.width as usize),
             Style::default().bg(theme.diff_file_view.bg),
         )));
+        visual_rows_filled += 1;
     }
 
     // Render left panel
@@ -488,9 +577,9 @@ pub fn draw(frame: &mut Frame, state: &mut DiffFileViewState, area: Rect, theme:
     frame.render_widget(right_paragraph, right_area);
 
     // Scrollbar
-    if total_lines > visible_lines {
+    if total_visual_rows > visible_lines {
         let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight);
-        let mut scrollbar_state = ScrollbarState::new(total_lines.saturating_sub(visible_lines))
+        let mut scrollbar_state = ScrollbarState::new(total_visual_rows.saturating_sub(visible_lines))
             .position(state.scroll);
         frame.render_stateful_widget(scrollbar, content_area, &mut scrollbar_state);
     }
@@ -577,15 +666,17 @@ pub fn draw(frame: &mut Frame, state: &mut DiffFileViewState, area: Rect, theme:
     frame.render_widget(fn_paragraph, function_area);
 }
 
-/// Render a single DiffLine into left and right Span vectors.
+/// Render a single DiffLine into multiple visual rows of (left_spans, right_spans).
+/// Wraps long lines at `wrap_width` (same for both sides) and pads to each panel's own width.
 fn render_diff_line<'a>(
     diff_line: &DiffLine,
     line_no_width: usize,
     left_width: usize,
     right_width: usize,
+    wrap_width: usize,
     theme: &Theme,
     is_current_change: bool,
-) -> (Vec<Span<'a>>, Vec<Span<'a>>) {
+) -> Vec<(Vec<Span<'a>>, Vec<Span<'a>>)> {
     let colors = &theme.diff_file_view;
 
     // Determine styles based on status
@@ -637,109 +728,245 @@ fn render_diff_line<'a>(
         .fg(colors.inline_change_text)
         .bg(colors.inline_change_bg);
 
-    // Left side
-    let left_spans = if left_empty {
-        // Empty placeholder for RightOnly lines
-        let no_str = format!("{}{:>width$}\u{2502}", marker, "", width = num_width);
-        let content_width = left_width.saturating_sub(line_no_width + 1);
-        vec![
-            Span::styled(no_str, Style::default().fg(colors.line_number).bg(colors.empty_bg)),
-            Span::styled(
-                format!("{:<width$}", "", width = content_width),
-                Style::default().bg(colors.empty_bg),
-            ),
-        ]
+    // Panel content widths (for padding), and wrap_width (for line breaking)
+    let left_content_width = left_width.saturating_sub(line_no_width + 1);
+    let right_content_width = right_width.saturating_sub(line_no_width + 1);
+    let left_extra_pad = left_content_width.saturating_sub(wrap_width);
+    let right_extra_pad = right_content_width.saturating_sub(wrap_width);
+
+    // Build wrapped content rows for each side (wrapped at wrap_width)
+    let left_content_rows: Vec<Vec<Span<'a>>>;
+    let right_content_rows: Vec<Vec<Span<'a>>>;
+
+    if diff_line.line_status == DiffLineStatus::Modified {
+        let lc = diff_line.left_content.as_deref().unwrap_or("");
+        let rc = diff_line.right_content.as_deref().unwrap_or("");
+        left_content_rows = build_inline_wrapped_lines(lc, rc, wrap_width, left_style, inline_style);
+        right_content_rows = build_inline_wrapped_lines(rc, lc, wrap_width, right_style, inline_style);
     } else {
-        let no_str = match diff_line.left_line_no {
-            Some(n) => format!("{}{:>width$}\u{2502}", marker, n, width = num_width),
-            None => format!("{}{:>width$}\u{2502}", marker, "", width = num_width),
-        };
-        let content_width = left_width.saturating_sub(line_no_width + 1);
-        let left_content = diff_line.left_content.as_deref().unwrap_or("");
-        if diff_line.line_status == DiffLineStatus::Modified {
-            let right_content = diff_line.right_content.as_deref().unwrap_or("");
-            let mut spans = vec![Span::styled(no_str, line_no_style)];
-            spans.extend(build_inline_spans(left_content, right_content, content_width, left_style, inline_style));
-            spans
-        } else {
-            let display_content = truncate_or_pad(left_content, content_width);
-            vec![
-                Span::styled(no_str, line_no_style),
-                Span::styled(display_content, left_style),
-            ]
-        }
-    };
-
-    // Right side
-    let right_spans = if right_empty {
-        // Empty placeholder for LeftOnly lines
-        let no_str = format!("{}{:>width$}\u{2502}", marker, "", width = num_width);
-        let content_width = right_width.saturating_sub(line_no_width + 1);
-        vec![
-            Span::styled(no_str, Style::default().fg(colors.line_number).bg(colors.empty_bg)),
-            Span::styled(
-                format!("{:<width$}", "", width = content_width),
+        // Non-modified lines: wrap_content at wrap_width
+        if left_empty {
+            left_content_rows = vec![vec![Span::styled(
+                " ".repeat(left_content_width),
                 Style::default().bg(colors.empty_bg),
-            ),
-        ]
-    } else {
-        let no_str = match diff_line.right_line_no {
-            Some(n) => format!("{}{:>width$}\u{2502}", marker, n, width = num_width),
-            None => format!("{}{:>width$}\u{2502}", marker, "", width = num_width),
-        };
-        let content_width = right_width.saturating_sub(line_no_width + 1);
-        let right_content = diff_line.right_content.as_deref().unwrap_or("");
-        if diff_line.line_status == DiffLineStatus::Modified {
-            let left_content = diff_line.left_content.as_deref().unwrap_or("");
-            let mut spans = vec![Span::styled(no_str, line_no_style_right)];
-            spans.extend(build_inline_spans(right_content, left_content, content_width, right_style, inline_style));
-            spans
+            )]];
         } else {
-            let display_content = truncate_or_pad(right_content, content_width);
-            vec![
-                Span::styled(no_str, line_no_style_right),
-                Span::styled(display_content, right_style),
-            ]
+            let lc = diff_line.left_content.as_deref().unwrap_or("");
+            let segments = wrap_content(lc, wrap_width);
+            left_content_rows = segments.into_iter().map(|s| vec![Span::styled(s, left_style)]).collect();
         }
-    };
 
-    (left_spans, right_spans)
-}
-
-/// Truncate string to fit display width, or pad with spaces to fill.
-/// Handles CJK/fullwidth characters correctly (2 columns each).
-fn truncate_or_pad(s: &str, width: usize) -> String {
-    let mut result = String::with_capacity(width);
-    let mut display_width = 0;
-
-    for ch in s.chars() {
-        if ch == '\t' {
-            // Expand tab to spaces
-            let spaces = 4 - (display_width % 4);
-            for _ in 0..spaces {
-                if display_width >= width {
-                    break;
-                }
-                result.push(' ');
-                display_width += 1;
-            }
+        if right_empty {
+            right_content_rows = vec![vec![Span::styled(
+                " ".repeat(right_content_width),
+                Style::default().bg(colors.empty_bg),
+            )]];
         } else {
-            let ch_width = ch.width().unwrap_or(0);
-            if display_width + ch_width > width {
-                break;
-            }
-            result.push(ch);
-            display_width += ch_width;
+            let rc = diff_line.right_content.as_deref().unwrap_or("");
+            let segments = wrap_content(rc, wrap_width);
+            right_content_rows = segments.into_iter().map(|s| vec![Span::styled(s, right_style)]).collect();
         }
     }
 
-    // Pad remaining with spaces
-    while display_width < width {
-        result.push(' ');
-        display_width += 1;
+    let row_count = left_content_rows.len().max(right_content_rows.len());
+    let mut result: Vec<(Vec<Span<'a>>, Vec<Span<'a>>)> = Vec::with_capacity(row_count);
+
+    for row_idx in 0..row_count {
+        // --- Left side prefix ---
+        let left_prefix = if row_idx == 0 {
+            if left_empty {
+                let no_str = format!("{}{:>width$}\u{2502}", marker, "", width = num_width);
+                Span::styled(no_str, Style::default().fg(colors.line_number).bg(colors.empty_bg))
+            } else {
+                let no_str = match diff_line.left_line_no {
+                    Some(n) => format!("{}{:>width$}\u{2502}", marker, n, width = num_width),
+                    None => format!("{}{:>width$}\u{2502}", marker, "", width = num_width),
+                };
+                Span::styled(no_str, line_no_style)
+            }
+        } else {
+            if left_empty {
+                let no_str = format!("{:>width$}\u{2502}", "", width = line_no_width);
+                Span::styled(no_str, Style::default().fg(colors.line_number).bg(colors.empty_bg))
+            } else {
+                let no_str = format!("{:>width$}\u{2502}", "", width = line_no_width);
+                Span::styled(no_str, line_no_style)
+            }
+        };
+
+        // --- Right side prefix ---
+        let right_prefix = if row_idx == 0 {
+            if right_empty {
+                let no_str = format!("{}{:>width$}\u{2502}", marker, "", width = num_width);
+                Span::styled(no_str, Style::default().fg(colors.line_number).bg(colors.empty_bg))
+            } else {
+                let no_str = match diff_line.right_line_no {
+                    Some(n) => format!("{}{:>width$}\u{2502}", marker, n, width = num_width),
+                    None => format!("{}{:>width$}\u{2502}", marker, "", width = num_width),
+                };
+                Span::styled(no_str, line_no_style_right)
+            }
+        } else {
+            if right_empty {
+                let no_str = format!("{:>width$}\u{2502}", "", width = line_no_width);
+                Span::styled(no_str, Style::default().fg(colors.line_number).bg(colors.empty_bg))
+            } else {
+                let no_str = format!("{:>width$}\u{2502}", "", width = line_no_width);
+                Span::styled(no_str, line_no_style_right)
+            }
+        };
+
+        // --- Left content (wrap_width) + extra padding to fill panel ---
+        let left_content = if row_idx < left_content_rows.len() {
+            let mut spans = left_content_rows[row_idx].clone();
+            if left_extra_pad > 0 {
+                spans.push(Span::styled(" ".repeat(left_extra_pad), left_style));
+            }
+            spans
+        } else {
+            let pad_style = if left_empty {
+                Style::default().bg(colors.empty_bg)
+            } else {
+                left_style
+            };
+            vec![Span::styled(" ".repeat(left_content_width), pad_style)]
+        };
+
+        // --- Right content (wrap_width) + extra padding to fill panel ---
+        let right_content = if row_idx < right_content_rows.len() {
+            let mut spans = right_content_rows[row_idx].clone();
+            if right_extra_pad > 0 {
+                spans.push(Span::styled(" ".repeat(right_extra_pad), right_style));
+            }
+            spans
+        } else {
+            let pad_style = if right_empty {
+                Style::default().bg(colors.empty_bg)
+            } else {
+                right_style
+            };
+            vec![Span::styled(" ".repeat(right_content_width), pad_style)]
+        };
+
+        // Assemble left spans: prefix + content
+        let mut left_spans = vec![left_prefix];
+        left_spans.extend(left_content);
+
+        // Assemble right spans: prefix + content
+        let mut right_spans = vec![right_prefix];
+        right_spans.extend(right_content);
+
+        result.push((left_spans, right_spans));
     }
 
     result
+}
+
+/// Count how many visual lines a string occupies when wrapped at `width` columns.
+/// Handles CJK (2-column) characters and tab expansion (wrap-aware tab stops).
+/// Must stay consistent with `wrap_content`.
+fn count_wrapped_lines(content: &str, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let mut lines = 1usize;
+    let mut col = 0usize;
+
+    for ch in content.chars() {
+        if ch == '\t' {
+            let spaces = 4 - (col % 4);
+            for _ in 0..spaces {
+                if col >= width {
+                    lines += 1;
+                    col = 0;
+                }
+                col += 1;
+            }
+        } else {
+            let ch_w = ch.width().unwrap_or(0);
+            if ch_w > 0 && col + ch_w > width {
+                lines += 1;
+                col = 0;
+            }
+            col += ch_w;
+        }
+    }
+    lines
+}
+
+/// Wrap a string into segments of exactly `width` display columns each (space-padded).
+/// Handles CJK boundary: if a 2-column char would overflow, pad current line and move char to next.
+/// Tabs expanded to spaces (4-stop).
+fn wrap_content(content: &str, width: usize) -> Vec<String> {
+    if width == 0 {
+        return vec![String::new()];
+    }
+    let mut segments: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut col = 0usize;
+
+    for ch in content.chars() {
+        if ch == '\t' {
+            let spaces = 4 - (col % 4);
+            for _ in 0..spaces {
+                if col >= width {
+                    // Pad and start new segment
+                    while col < width {
+                        current.push(' ');
+                        col += 1;
+                    }
+                    segments.push(std::mem::take(&mut current));
+                    col = 0;
+                }
+                current.push(' ');
+                col += 1;
+            }
+        } else {
+            let ch_w = ch.width().unwrap_or(0);
+            if ch_w > 0 && col + ch_w > width {
+                // Pad current line and start new
+                while col < width {
+                    current.push(' ');
+                    col += 1;
+                }
+                segments.push(std::mem::take(&mut current));
+                col = 0;
+            }
+            current.push(ch);
+            col += ch_w;
+        }
+    }
+
+    // Pad the last segment
+    while col < width {
+        current.push(' ');
+        col += 1;
+    }
+    segments.push(current);
+
+    segments
+}
+
+/// Count wrapped visual rows for inline-diff rendering of Modified lines.
+/// Mirrors the wrapping logic of `build_inline_wrapped_lines` exactly:
+/// processes `max_len` positions, using the actual char from `this_chars`
+/// or a space if beyond its length.
+fn count_inline_wrapped_rows(this_chars: &[char], max_len: usize, width: usize) -> usize {
+    if width == 0 {
+        return 1;
+    }
+    let mut lines = 1usize;
+    let mut col = 0usize;
+    for i in 0..max_len {
+        let ch = this_chars.get(i).copied().unwrap_or(' ');
+        let ch_w = ch.width().unwrap_or(0);
+        if ch_w > 0 && col + ch_w > width {
+            lines += 1;
+            col = 0;
+        }
+        col += ch_w;
+    }
+    lines
 }
 
 /// Expand a string into a flat character list with tabs expanded to spaces.
@@ -761,68 +988,91 @@ fn expand_chars(s: &str) -> Vec<char> {
     result
 }
 
-/// Build inline diff spans for Modified lines, highlighting character-level differences.
-/// `this_content` is the content to render, `other_content` is the opposite side for comparison.
-fn build_inline_spans<'a>(
+/// Build wrapped visual lines for a Modified line with inline diff highlighting.
+/// Returns Vec of span-rows, each row exactly `width` display columns (space-padded).
+/// Wrapping semantics match `wrap_content`: a row is flushed only when the NEXT char
+/// would overflow, not when exactly filling. This keeps row counts consistent with
+/// `count_inline_wrapped_rows`.
+fn build_inline_wrapped_lines<'a>(
     this_content: &str,
     other_content: &str,
     width: usize,
     base_style: Style,
     inline_style: Style,
-) -> Vec<Span<'a>> {
+) -> Vec<Vec<Span<'a>>> {
+    if width == 0 {
+        return vec![vec![]];
+    }
     let this_chars = expand_chars(this_content);
     let other_chars = expand_chars(other_content);
 
-    let mut spans: Vec<Span<'a>> = Vec::new();
-    let mut buf = String::new();
-    let mut buf_is_diff = false;
-    let mut display_width = 0;
     let max_len = this_chars.len().max(other_chars.len());
 
-    for i in 0..max_len {
-        if display_width >= width {
-            break;
-        }
+    let mut all_rows: Vec<Vec<Span<'a>>> = Vec::new();
+    let mut row_spans: Vec<Span<'a>> = Vec::new();
+    let mut buf = String::new();
+    let mut buf_is_diff = false;
+    let mut col = 0usize;
 
+    for i in 0..max_len {
         let this_ch = this_chars.get(i).copied();
         let other_ch = other_chars.get(i).copied();
-
         let ch = this_ch.unwrap_or(' ');
         let ch_w = ch.width().unwrap_or(0);
+        // Only highlight as diff when this side has actual content at this position.
+        // Beyond this side's content, use base_style (padding spaces, not inline highlight).
+        let is_diff = this_ch.is_some() && this_ch != other_ch;
 
-        if display_width + ch_w > width {
-            break;
+        // Check if this char would overflow current row
+        if ch_w > 0 && col + ch_w > width {
+            // Flush buffer
+            if !buf.is_empty() {
+                row_spans.push(Span::styled(
+                    std::mem::take(&mut buf),
+                    if buf_is_diff { inline_style } else { base_style },
+                ));
+            }
+            // Pad remainder (for CJK: col might be width-1 when a 2-col char doesn't fit)
+            if col < width {
+                row_spans.push(Span::styled(
+                    " ".repeat(width - col),
+                    base_style,
+                ));
+            }
+            all_rows.push(std::mem::take(&mut row_spans));
+            col = 0;
+            buf_is_diff = is_diff;
         }
 
-        let is_diff = this_ch != other_ch;
-
+        // Style change → flush
         if is_diff != buf_is_diff && !buf.is_empty() {
-            spans.push(Span::styled(
+            row_spans.push(Span::styled(
                 std::mem::take(&mut buf),
                 if buf_is_diff { inline_style } else { base_style },
             ));
         }
         buf_is_diff = is_diff;
         buf.push(ch);
-        display_width += ch_w;
+        col += ch_w;
     }
 
+    // Flush remaining buffer and pad final row
     if !buf.is_empty() {
-        spans.push(Span::styled(
+        row_spans.push(Span::styled(
             buf,
             if buf_is_diff { inline_style } else { base_style },
         ));
     }
-
-    // Pad remaining with spaces
-    if display_width < width {
-        spans.push(Span::styled(
-            " ".repeat(width - display_width),
+    if col < width {
+        row_spans.push(Span::styled(
+            " ".repeat(width - col),
             base_style,
         ));
     }
+    // Always push the final row (contains at least padding for empty content)
+    all_rows.push(row_spans);
 
-    spans
+    all_rows
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -836,8 +1086,7 @@ pub fn handle_input(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) {
     };
 
     let visible = state.visible_height;
-    let total = state.diff_lines.len();
-    let max_scroll = total.saturating_sub(visible);
+    let max_scroll = state.max_scroll;
 
     match code {
         KeyCode::Up => {
@@ -861,23 +1110,27 @@ pub fn handle_input(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) {
             state.scroll = max_scroll;
         }
         KeyCode::Char('n') => {
-            // Jump to next change position (or scroll to current if not visible)
+            // Jump to next change position using visual row offsets
             if !state.change_positions.is_empty() {
                 if state.current_change + 1 < state.change_positions.len() {
                     state.current_change += 1;
                 }
-                let target = state.change_positions[state.current_change];
-                state.scroll = target.saturating_sub(visible / 4).min(max_scroll);
+                if state.current_change < state.change_visual_offsets.len() {
+                    let target = state.change_visual_offsets[state.current_change];
+                    state.scroll = target.saturating_sub(visible / 4).min(max_scroll);
+                }
             }
         }
         KeyCode::Char('N') | KeyCode::Char('p') | KeyCode::Char('P') => {
-            // Jump to previous change position (or scroll to current if not visible)
+            // Jump to previous change position using visual row offsets
             if !state.change_positions.is_empty() {
                 if state.current_change > 0 {
                     state.current_change -= 1;
                 }
-                let target = state.change_positions[state.current_change];
-                state.scroll = target.saturating_sub(visible / 4).min(max_scroll);
+                if state.current_change < state.change_visual_offsets.len() {
+                    let target = state.change_visual_offsets[state.current_change];
+                    state.scroll = target.saturating_sub(visible / 4).min(max_scroll);
+                }
             }
         }
         KeyCode::Esc => {
@@ -947,10 +1200,23 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_or_pad() {
-        assert_eq!(truncate_or_pad("hello", 10), "hello     ");
-        assert_eq!(truncate_or_pad("hello world!", 5), "hello");
-        assert_eq!(truncate_or_pad("", 3), "   ");
+    fn test_wrap_content() {
+        // Short string: single segment, padded
+        assert_eq!(wrap_content("hello", 10), vec!["hello     "]);
+        // Exact fit
+        assert_eq!(wrap_content("hello", 5), vec!["hello"]);
+        // Wraps into two segments
+        assert_eq!(wrap_content("hello world!", 5), vec!["hello", " worl", "d!   "]);
+        // Empty string: padded
+        assert_eq!(wrap_content("", 3), vec!["   "]);
+    }
+
+    #[test]
+    fn test_count_wrapped_lines() {
+        assert_eq!(count_wrapped_lines("hello", 10), 1);
+        assert_eq!(count_wrapped_lines("hello", 5), 1);
+        assert_eq!(count_wrapped_lines("hello world!", 5), 3);
+        assert_eq!(count_wrapped_lines("", 5), 1);
     }
 
     #[test]
