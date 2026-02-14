@@ -165,21 +165,102 @@ export default function FileOperations() {
                 선택한 파일의 상세 정보(크기, 수정 날짜, 권한 등)를 확인할 수 있습니다.
               </p>
             </div>
-            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
-              <div className="flex items-center gap-3 mb-2">
-                <KeyBadge>U</KeyBadge>
-                <span className="text-white font-semibold">확장자 연결 프로그램 설정</span>
-              </div>
-              <p className="text-zinc-400 text-sm">
-                특정 확장자의 파일을 열 때 어떤 프로그램을 사용할지 설정합니다.
-                예를 들어 .pdf 파일을 열 때 항상 특정 프로그램을 사용하도록 지정할 수 있습니다.
-              </p>
-            </div>
           </div>
 
           <TipBox>
             가장 자주 쓰는 키 3개만 기억하세요: <KeyBadge>Ctrl+C</KeyBadge> 복사, <KeyBadge>Ctrl+V</KeyBadge> 붙여넣기, <KeyBadge>X</KeyBadge> 삭제.
             나머지는 필요할 때 이 페이지를 참고하면 됩니다.
+          </TipBox>
+
+          {/* ========== 파일 열기 프로그램 설정 ========== */}
+          <SectionHeading id="extension-handler" level={3}>파일 열기 프로그램 설정 (U 키)</SectionHeading>
+          <p className="text-zinc-400 mb-4 leading-relaxed">
+            PDF 파일을 열 때 항상 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">evince</code>를 쓰고 싶다거나,
+            이미지 파일을 열 때 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">feh</code>를 쓰고 싶다면?
+            확장자별로 "이 파일은 이 프로그램으로 열어라"를 지정해 둘 수 있습니다.
+            한 번 설정하면, 이후 <KeyBadge>Enter</KeyBadge>로 해당 확장자 파일을 열 때 지정된 프로그램이 자동으로 실행됩니다.
+          </p>
+
+          <h4 className="text-white font-semibold mb-3">새 핸들러 등록하기</h4>
+          <StepByStep steps={[
+            {
+              title: '설정할 파일 위에 커서를 놓고 U를 누릅니다',
+              description: (
+                <span>
+                  예를 들어 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">photo.jpg</code> 파일 위에서
+                  <KeyBadge>U</KeyBadge>를 누르면, ".jpg" 확장자에 대한 핸들러 설정 화면이 열립니다.
+                </span>
+              ),
+            },
+            {
+              title: '실행할 명령어를 입력합니다',
+              description: (
+                <div>
+                  <p className="mb-2">
+                    파일 경로가 들어갈 자리에 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">{'{{FILEPATH}}'}</code>를 넣어서 명령어를 작성합니다:
+                  </p>
+                  <div className="bg-bg-elevated border border-zinc-800 rounded-lg p-3 font-mono text-sm space-y-2">
+                    <div>
+                      <span className="text-zinc-500"># 이미지를 feh로 열기</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">{'feh {{FILEPATH}}'}</span>
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-zinc-500"># PDF를 evince로 열기 (GUI 앱은 @를 앞에 붙임)</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">{'@evince {{FILEPATH}}'}</span>
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-zinc-500"># 터미널 앱(vim 등)으로 열기</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">{'vim {{FILEPATH}}'}</span>
+                    </div>
+                  </div>
+                </div>
+              ),
+            },
+            {
+              title: 'Enter를 누르면 저장 및 실행됩니다',
+              description: '명령어가 저장되고, 즉시 해당 파일에 대해 실행됩니다. 이후 같은 확장자의 파일을 Enter로 열 때마다 이 프로그램이 사용됩니다.',
+            },
+          ]} />
+
+          <div className="bg-bg-card border border-zinc-800 rounded-lg p-4 mb-4">
+            <div className="text-white font-semibold mb-2">
+              <code className="text-accent-cyan font-mono bg-bg-elevated px-1.5 py-0.5 rounded text-sm">@</code> 접두어 — 백그라운드 실행
+            </div>
+            <p className="text-zinc-400 text-sm leading-relaxed">
+              명령어 앞에 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">@</code>를 붙이면 프로그램이 백그라운드에서 실행됩니다.
+              <strong className="text-zinc-300"> GUI 프로그램</strong>(evince, feh, vlc, gimp 등)은 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">@</code>를 붙여야
+              cokacdir 화면이 멈추지 않고 바로 돌아옵니다.
+              <strong className="text-zinc-300"> 터미널 프로그램</strong>(vim, nano, less 등)은 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">@</code> 없이 입력하면
+              화면을 넘겨주고, 프로그램 종료 후 cokacdir로 돌아옵니다.
+            </p>
+          </div>
+
+          <h4 className="text-white font-semibold mb-3 mt-6">기존 핸들러 수정 / 삭제하기</h4>
+          <p className="text-zinc-400 mb-4">
+            이미 핸들러가 설정된 확장자의 파일에서 <KeyBadge>U</KeyBadge>를 누르면,
+            현재 설정된 명령어가 입력창에 표시됩니다.
+          </p>
+          <div className="space-y-2 mb-6">
+            <div className="flex items-start gap-3 text-zinc-400">
+              <span className="w-5 h-5 rounded-full bg-accent-cyan/20 text-accent-cyan text-xs flex items-center justify-center flex-shrink-0 mt-0.5">{'✎'}</span>
+              <span><strong className="text-zinc-300">수정:</strong> 기존 명령어를 편집한 뒤 <KeyBadge>Enter</KeyBadge>를 누르면 새 명령어로 저장됩니다.</span>
+            </div>
+            <div className="flex items-start gap-3 text-zinc-400">
+              <span className="w-5 h-5 rounded-full bg-yellow-400/20 text-yellow-400 text-xs flex items-center justify-center flex-shrink-0 mt-0.5">{'✕'}</span>
+              <span><strong className="text-zinc-300">삭제:</strong> 명령어를 모두 지운 뒤(빈 칸 상태에서) <KeyBadge>Enter</KeyBadge>를 누르면 핸들러가 제거됩니다. 이후 Enter로 파일을 열면 기본 동작(편집기)으로 돌아갑니다.</span>
+            </div>
+          </div>
+
+          <TipBox>
+            핸들러 설정은 확장자 단위로 적용됩니다.
+            예를 들어 .jpg 파일에 핸들러를 설정하면, 모든 .jpg 파일에 동일하게 적용됩니다.
+            설정은 자동 저장되어 cokacdir를 재시작해도 유지됩니다.
           </TipBox>
         </>
       ) : (
@@ -336,21 +417,102 @@ export default function FileOperations() {
                 View detailed information about the selected file (size, modification date, permissions, etc.).
               </p>
             </div>
-            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
-              <div className="flex items-center gap-3 mb-2">
-                <KeyBadge>U</KeyBadge>
-                <span className="text-white font-semibold">Set File Association</span>
-              </div>
-              <p className="text-zinc-400 text-sm">
-                Configure which program to use when opening files with a specific extension.
-                For example, always open .pdf files with a particular application.
-              </p>
-            </div>
           </div>
 
           <TipBox>
             Just remember 3 keys: <KeyBadge>Ctrl+C</KeyBadge> copy, <KeyBadge>Ctrl+V</KeyBadge> paste, <KeyBadge>X</KeyBadge> delete.
             Refer to this page for the rest when needed.
+          </TipBox>
+
+          {/* ========== File Handler Setup ========== */}
+          <SectionHeading id="extension-handler" level={3}>File Handlers (U Key)</SectionHeading>
+          <p className="text-zinc-400 mb-4 leading-relaxed">
+            Want to always open PDF files with <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">evince</code>,
+            or images with <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">feh</code>?
+            You can assign a program to each file extension.
+            Once set, pressing <KeyBadge>Enter</KeyBadge> on files with that extension will automatically launch the assigned program.
+          </p>
+
+          <h4 className="text-white font-semibold mb-3">Setting Up a New Handler</h4>
+          <StepByStep steps={[
+            {
+              title: 'Place cursor on a file and press U',
+              description: (
+                <span>
+                  For example, press <KeyBadge>U</KeyBadge> on <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">photo.jpg</code> to
+                  open the handler setup dialog for the ".jpg" extension.
+                </span>
+              ),
+            },
+            {
+              title: 'Type the command to execute',
+              description: (
+                <div>
+                  <p className="mb-2">
+                    Use <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">{'{{FILEPATH}}'}</code> as a placeholder for the file path:
+                  </p>
+                  <div className="bg-bg-elevated border border-zinc-800 rounded-lg p-3 font-mono text-sm space-y-2">
+                    <div>
+                      <span className="text-zinc-500"># Open images with feh</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">{'feh {{FILEPATH}}'}</span>
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-zinc-500"># Open PDFs with evince (prefix @ for GUI apps)</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">{'@evince {{FILEPATH}}'}</span>
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-zinc-500"># Open with a terminal app (vim, etc.)</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">{'vim {{FILEPATH}}'}</span>
+                    </div>
+                  </div>
+                </div>
+              ),
+            },
+            {
+              title: 'Press Enter to save and execute',
+              description: 'The command is saved and immediately executed on the current file. From now on, pressing Enter on any file with the same extension will use this program.',
+            },
+          ]} />
+
+          <div className="bg-bg-card border border-zinc-800 rounded-lg p-4 mb-4">
+            <div className="text-white font-semibold mb-2">
+              <code className="text-accent-cyan font-mono bg-bg-elevated px-1.5 py-0.5 rounded text-sm">@</code> Prefix — Background Execution
+            </div>
+            <p className="text-zinc-400 text-sm leading-relaxed">
+              Prefix a command with <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">@</code> to run it in the background.
+              <strong className="text-zinc-300"> GUI programs</strong> (evince, feh, vlc, gimp, etc.) should use <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">@</code> so
+              cokacdir returns immediately without waiting.
+              <strong className="text-zinc-300"> Terminal programs</strong> (vim, nano, less, etc.) should be used without <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">@</code> —
+              the screen is handed over to the program, and cokacdir resumes after it exits.
+            </p>
+          </div>
+
+          <h4 className="text-white font-semibold mb-3 mt-6">Editing / Deleting a Handler</h4>
+          <p className="text-zinc-400 mb-4">
+            Press <KeyBadge>U</KeyBadge> on a file whose extension already has a handler,
+            and the current command appears pre-filled in the input field.
+          </p>
+          <div className="space-y-2 mb-6">
+            <div className="flex items-start gap-3 text-zinc-400">
+              <span className="w-5 h-5 rounded-full bg-accent-cyan/20 text-accent-cyan text-xs flex items-center justify-center flex-shrink-0 mt-0.5">{'✎'}</span>
+              <span><strong className="text-zinc-300">Edit:</strong> Modify the command and press <KeyBadge>Enter</KeyBadge> to save the updated command.</span>
+            </div>
+            <div className="flex items-start gap-3 text-zinc-400">
+              <span className="w-5 h-5 rounded-full bg-yellow-400/20 text-yellow-400 text-xs flex items-center justify-center flex-shrink-0 mt-0.5">{'✕'}</span>
+              <span><strong className="text-zinc-300">Delete:</strong> Clear all text so the field is empty, then press <KeyBadge>Enter</KeyBadge>. The handler is removed and opening the file reverts to the default behavior (text editor).</span>
+            </div>
+          </div>
+
+          <TipBox>
+            Handlers are set per file extension.
+            For example, setting a handler on a .jpg file applies to all .jpg files.
+            Settings are saved automatically and persist across cokacdir sessions.
           </TipBox>
         </>
       )}
