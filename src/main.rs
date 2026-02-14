@@ -427,7 +427,12 @@ fn run_app<B: ratatui::backend::Backend>(
         // Poll for diff comparison progress if on DiffScreen
         if app.current_screen == Screen::DiffScreen {
             if let Some(ref mut state) = app.diff_state {
-                state.poll();
+                let just_completed = state.poll();
+                if just_completed && !state.has_differences() {
+                    app.diff_state = None;
+                    app.current_screen = Screen::FilePanel;
+                    app.show_message("No differences found");
+                }
             }
         }
 
@@ -634,7 +639,7 @@ fn run_app<B: ratatui::backend::Backend>(
                             if app.dialog.is_some() {
                                 ui::dialogs::handle_dialog_input(app, key.code, key.modifiers);
                             } else {
-                                ui::image_viewer::handle_input(app, key.code);
+                                ui::image_viewer::handle_input(app, key.code, key.modifiers);
                             }
                         }
                         Screen::SearchResult => {

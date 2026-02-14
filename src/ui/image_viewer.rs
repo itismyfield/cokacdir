@@ -1,4 +1,4 @@
-use crossterm::event::KeyCode;
+use crossterm::event::{KeyCode, KeyModifiers};
 use image::DynamicImage;
 use ratatui::{
     layout::Rect,
@@ -515,7 +515,7 @@ fn render_image(frame: &mut Frame, img: &DynamicImage, area: Rect, zoom: f32, of
     );
 }
 
-pub fn handle_input(app: &mut App, code: KeyCode) {
+pub fn handle_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
     let state = match &mut app.image_viewer_state {
         Some(s) => s,
         None => {
@@ -547,6 +547,12 @@ pub fn handle_input(app: &mut App, code: KeyCode) {
         }
         KeyCode::Char('r') | KeyCode::Char('R') => {
             state.reset_view();
+        }
+        KeyCode::Up if modifiers.contains(KeyModifiers::SHIFT) => {
+            state.navigate_prev();
+        }
+        KeyCode::Down if modifiers.contains(KeyModifiers::SHIFT) => {
+            state.navigate_next();
         }
         KeyCode::Up => {
             state.pan(0, 5);

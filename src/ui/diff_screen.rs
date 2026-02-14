@@ -251,10 +251,11 @@ impl DiffState {
         });
     }
 
-    /// Poll for comparison progress and results
-    pub fn poll(&mut self) {
+    /// Poll for comparison progress and results.
+    /// Returns true when comparison just completed this tick.
+    pub fn poll(&mut self) -> bool {
         if !self.is_comparing {
-            return;
+            return false;
         }
 
         // Drain progress messages
@@ -290,6 +291,7 @@ impl DiffState {
                     self.is_comparing = false;
                     self.receiver = None;
                     self.progress_receiver = None;
+                    return true;
                 }
                 Err(mpsc::TryRecvError::Empty) => {}
                 Err(mpsc::TryRecvError::Disconnected) => {
@@ -299,6 +301,17 @@ impl DiffState {
                 }
             }
         }
+        false
+    }
+
+    /// Returns true if there are any differences (Modified, LeftOnly, RightOnly, DirModified)
+    pub fn has_differences(&self) -> bool {
+        self.all_entries.iter().any(|e| {
+            matches!(
+                e.status,
+                DiffStatus::Modified | DiffStatus::LeftOnly | DiffStatus::RightOnly | DiffStatus::DirModified
+            )
+        })
     }
 
     /// Cancel ongoing comparison
@@ -1879,7 +1892,7 @@ fn draw_column_headers(frame: &mut Frame, area: Rect, theme: &Theme) {
 
     let build_header = |width: u16| -> String {
         let w = width as usize;
-        let name_col = w.saturating_sub(size_col + date_col + 2);
+        let name_col = w.saturating_sub(size_col + date_col + 3);
         let header = format!(
             " {:<name_w$} {:>size_w$} {:>date_w$}",
             "Name",
@@ -1897,11 +1910,12 @@ fn draw_column_headers(frame: &mut Frame, area: Rect, theme: &Theme) {
         }
     };
 
-    let header_left = build_header(left_width);
+    let header_left = build_header(left_width.saturating_sub(1));
     let header_right = build_header(right_width);
 
     let line = Line::from(vec![
         Span::styled(header_left, col_style),
+        Span::styled(" ", col_style),
         Span::styled(header_right, col_style),
     ]);
 
