@@ -41,7 +41,7 @@ export default function ViewerEditor() {
               ),
             },
             {
-              title: '다 봤으면 Esc 또는 Q로 닫습니다',
+              title: '다 봤으면 Esc로 닫습니다',
               description: '파일 목록 화면으로 돌아갑니다.',
             },
           ]} />
@@ -208,7 +208,7 @@ export default function ViewerEditor() {
               ),
             },
             {
-              title: 'Close with Esc or Q when done',
+              title: 'Close with Esc when done',
               description: 'Returns to the file list screen.',
             },
           ]} />

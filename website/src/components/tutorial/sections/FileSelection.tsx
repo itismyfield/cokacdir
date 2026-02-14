@@ -62,12 +62,12 @@ export default function FileSelection() {
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
                 <KeyBadge>*</KeyBadge>
-                <span className="text-white font-semibold">선택 반전</span>
+                <span className="text-white font-semibold">전체 선택 / 전체 해제</span>
               </div>
               <p className="text-zinc-400 text-sm">
-                선택된 파일은 해제하고, 선택 안 된 파일은 선택합니다.
-                예를 들어, 대부분을 선택하고 몇 개만 빼고 싶을 때:
-                먼저 빼고 싶은 것만 Space로 선택한 뒤 <KeyBadge>*</KeyBadge>를 누르면 나머지가 선택됩니다.
+                아무 파일도 선택하지 않은 상태에서 누르면 현재 폴더의 모든 파일이 선택됩니다.
+                이미 선택된 파일이 있으면 모든 선택이 해제됩니다.
+                <KeyBadge>Ctrl+A</KeyBadge>와 동일한 기능입니다.
               </p>
             </div>
 
@@ -156,12 +156,12 @@ export default function FileSelection() {
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
                 <KeyBadge>*</KeyBadge>
-                <span className="text-white font-semibold">Invert Selection</span>
+                <span className="text-white font-semibold">Select All / Deselect All</span>
               </div>
               <p className="text-zinc-400 text-sm">
-                Deselects selected files and selects unselected ones.
-                For example, to select most files except a few:
-                first select the ones you want to exclude with Space, then press <KeyBadge>*</KeyBadge> to invert.
+                If no files are selected, it selects all files in the current folder.
+                If any files are already selected, it deselects everything.
+                Works the same as <KeyBadge>Ctrl+A</KeyBadge>.
               </p>
             </div>
 

@@ -33,8 +33,14 @@ export default function BookmarksHelp() {
               ),
             },
             {
-              title: '나중에 북마크 목록에서 바로 이동합니다',
-              description: '북마크한 폴더는 저장되어 다음에 cokacdir를 실행할 때도 유지됩니다.',
+              title: '/ 키로 북마크 목록에서 바로 이동합니다',
+              description: (
+                <span>
+                  <KeyBadge>/</KeyBadge>(경로 이동)를 누르면 저장된 북마크 목록이 표시됩니다.
+                  원하는 폴더를 선택하고 <KeyBadge>Enter</KeyBadge>를 누르면 바로 이동합니다.
+                  북마크는 저장되어 다음에 cokacdir를 실행할 때도 유지됩니다.
+                </span>
+              ),
             },
           ]} />
 
@@ -100,8 +106,14 @@ export default function BookmarksHelp() {
               ),
             },
             {
-              title: 'Jump to bookmarked folders later',
-              description: 'Bookmarks are saved and persist across cokacdir sessions.',
+              title: 'Press / to jump to bookmarked folders',
+              description: (
+                <span>
+                  Press <KeyBadge>/</KeyBadge> (Go to Path) to see your saved bookmark list.
+                  Select a folder and press <KeyBadge>Enter</KeyBadge> to jump there instantly.
+                  Bookmarks are saved and persist across cokacdir sessions.
+                </span>
+              ),
             },
           ]} />
 

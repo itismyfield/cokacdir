@@ -66,11 +66,12 @@ export default function ImageViewer() {
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
                 <KeyBadge>Space</KeyBadge>
-                <span className="text-white font-semibold">이미지 선택/해제</span>
+                <span className="text-white font-semibold">이미지 선택 후 다음으로</span>
               </div>
               <p className="text-zinc-400 text-sm">
-                이미지를 보면서 마음에 드는 것을 선택할 수 있습니다.
-                여러 이미지를 선택한 뒤 뷰어를 닫으면 선택이 유지되어 복사나 이동이 가능합니다.
+                현재 이미지를 선택(또는 해제)하고 자동으로 다음 이미지로 넘어갑니다.
+                연속으로 Space를 누르면서 마음에 드는 사진을 빠르게 골라낼 수 있습니다.
+                뷰어를 닫아도 선택이 유지되어 복사나 이동이 가능합니다.
               </p>
             </div>
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
@@ -93,9 +94,9 @@ export default function ImageViewer() {
           </div>
 
           <TipBox>
-            사진 폴더에서 <KeyBadge>PgUp</KeyBadge>/<KeyBadge>PgDn</KeyBadge>으로 사진을 넘기면서
-            <KeyBadge>Space</KeyBadge>로 원하는 사진만 선택하고, 뷰어를 닫은 뒤 한 번에 복사하면
-            효율적으로 사진을 골라낼 수 있습니다.
+            사진 폴더에서 <KeyBadge>Space</KeyBadge>만 연속으로 누르면 "선택 → 다음 사진"이 반복되어
+            마음에 드는 사진을 빠르게 고를 수 있습니다. 건너뛰고 싶으면 <KeyBadge>PgDn</KeyBadge>으로 넘기세요.
+            뷰어를 닫은 뒤 선택된 파일을 한 번에 복사하면 효율적입니다.
           </TipBox>
 
           <TipBox variant="note">
@@ -157,10 +158,11 @@ export default function ImageViewer() {
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
                 <KeyBadge>Space</KeyBadge>
-                <span className="text-white font-semibold">Select / Deselect Image</span>
+                <span className="text-white font-semibold">Select and Next</span>
               </div>
               <p className="text-zinc-400 text-sm">
-                Mark images you like while browsing.
+                Selects (or deselects) the current image and automatically moves to the next one.
+                Press Space repeatedly to quickly pick your favorite photos.
                 Selections are preserved when you close the viewer, so you can copy or move them afterward.
               </p>
             </div>
@@ -184,9 +186,9 @@ export default function ImageViewer() {
           </div>
 
           <TipBox>
-            In a photo folder, flip through images with <KeyBadge>PgUp</KeyBadge>/<KeyBadge>PgDn</KeyBadge>,
-            select favorites with <KeyBadge>Space</KeyBadge>, then close the viewer and copy them all at once
-            for an efficient photo-picking workflow.
+            In a photo folder, just press <KeyBadge>Space</KeyBadge> repeatedly — it selects and automatically moves
+            to the next image. Skip unwanted ones with <KeyBadge>PgDn</KeyBadge>.
+            Close the viewer and copy all selected files at once for an efficient photo-picking workflow.
           </TipBox>
 
           <TipBox variant="note">

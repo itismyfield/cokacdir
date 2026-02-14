@@ -48,7 +48,7 @@ const groups: ShortcutGroup[] = [
     shortcuts: [
       { key: <KeyBadge>Space</KeyBadge>, en: 'Select / Deselect', ko: '선택 / 선택 해제' },
       { key: <KeyBadge>Ctrl+A</KeyBadge>, en: 'Select all', ko: '전체 선택' },
-      { key: <KeyBadge>*</KeyBadge>, en: 'Invert selection', ko: '선택 반전' },
+      { key: <KeyBadge>*</KeyBadge>, en: 'Select all / Deselect all', ko: '전체 선택 / 전체 해제' },
       { key: <KeyBadge>;</KeyBadge>, en: 'Select by extension', ko: '같은 확장자 파일 선택' },
       { key: <><KeyBadge>Shift</KeyBadge>+<KeyBadge>{'\u2191'}</KeyBadge>/<KeyBadge>{'\u2193'}</KeyBadge></>, en: 'Select while moving', ko: '이동하면서 선택' },
     ],

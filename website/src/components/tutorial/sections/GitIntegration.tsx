@@ -41,38 +41,39 @@ export default function GitIntegration() {
 
           <SectionHeading id="git-tabs" level={3}>Git 화면 구성</SectionHeading>
           <p className="text-zinc-400 mb-4">
-            Git 화면은 3개의 탭으로 나뉘어 있습니다. 숫자 키로 탭을 전환할 수 있습니다:
+            Git 화면은 3개의 탭으로 나뉘어 있습니다. 숫자 키 또는 좌우 화살표로 탭을 전환할 수 있습니다:
           </p>
           <div className="space-y-3 mb-6">
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
                 <KeyBadge>1</KeyBadge>
-                <span className="text-white font-semibold">커밋 (Commits)</span>
+                <span className="text-white font-semibold">커밋 (Commit)</span>
               </div>
               <p className="text-zinc-400 text-sm">
-                지금까지의 변경 기록을 시간순으로 보여줍니다.
-                "누가, 언제, 무엇을 변경했는지" 확인할 수 있습니다.
-                커밋을 선택하고 <KeyBadge>Tab</KeyBadge>을 누르면 해당 커밋에서 변경된 파일 목록도 볼 수 있습니다.
+                현재 작업 상태를 보여줍니다. 수정된 파일, 스테이징된 파일을 확인하고 커밋을 만들 수 있습니다.
+                <KeyBadge>Tab</KeyBadge>을 누르면 파일 목록과 커밋 메시지 입력 사이를 전환할 수 있습니다.
               </p>
             </div>
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
                 <KeyBadge>2</KeyBadge>
-                <span className="text-white font-semibold">브랜치 (Branches)</span>
+                <span className="text-white font-semibold">로그 (Log)</span>
               </div>
               <p className="text-zinc-400 text-sm">
-                현재 저장소의 모든 브랜치를 보여줍니다.
-                브랜치는 "작업 분기"로, 같은 프로젝트에서 여러 버전을 동시에 관리할 때 사용합니다.
+                지금까지의 커밋 기록을 시간순으로 보여줍니다.
+                "누가, 언제, 무엇을 변경했는지" 확인할 수 있습니다.
+                커밋을 선택하고 <KeyBadge>Enter</KeyBadge>를 누르면 해당 커밋에서 변경된 내용을 상세히 볼 수 있습니다.
               </p>
             </div>
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
                 <KeyBadge>3</KeyBadge>
-                <span className="text-white font-semibold">스태시 (Stashes)</span>
+                <span className="text-white font-semibold">브랜치 (Branch)</span>
               </div>
               <p className="text-zinc-400 text-sm">
-                임시로 저장해둔 변경사항을 보여줍니다.
-                "지금 하던 작업을 잠깐 넣어두고 다른 일 하고 싶을 때" 사용하는 기능입니다.
+                현재 저장소의 모든 브랜치를 보여줍니다.
+                브랜치는 "작업 분기"로, 같은 프로젝트에서 여러 버전을 동시에 관리할 때 사용합니다.
+                브랜치를 선택하고 <KeyBadge>Enter</KeyBadge>를 누르면 해당 브랜치로 체크아웃할 수 있습니다.
               </p>
             </div>
           </div>
@@ -137,38 +138,39 @@ export default function GitIntegration() {
 
           <SectionHeading id="git-tabs" level={3}>Git View Layout</SectionHeading>
           <p className="text-zinc-400 mb-4">
-            The Git view has 3 tabs. Switch between them with number keys:
+            The Git view has 3 tabs. Switch between them with number keys or left/right arrows:
           </p>
           <div className="space-y-3 mb-6">
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
                 <KeyBadge>1</KeyBadge>
-                <span className="text-white font-semibold">Commits</span>
+                <span className="text-white font-semibold">Commit</span>
               </div>
               <p className="text-zinc-400 text-sm">
-                Shows the change history in chronological order.
-                See "who changed what, and when".
-                Select a commit and press <KeyBadge>Tab</KeyBadge> to view the list of files changed in that commit.
+                Shows the current working state. View modified files, staged files, and create commits.
+                Press <KeyBadge>Tab</KeyBadge> to switch between the file list and the commit message input.
               </p>
             </div>
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
                 <KeyBadge>2</KeyBadge>
-                <span className="text-white font-semibold">Branches</span>
+                <span className="text-white font-semibold">Log</span>
               </div>
               <p className="text-zinc-400 text-sm">
-                Shows all branches in the repository.
-                Branches are "work forks" used to manage multiple versions of the same project simultaneously.
+                Shows the commit history in chronological order.
+                See "who changed what, and when".
+                Select a commit and press <KeyBadge>Enter</KeyBadge> to view the detailed changes in that commit.
               </p>
             </div>
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
                 <KeyBadge>3</KeyBadge>
-                <span className="text-white font-semibold">Stashes</span>
+                <span className="text-white font-semibold">Branch</span>
               </div>
               <p className="text-zinc-400 text-sm">
-                Shows temporarily saved changes.
-                Used when you want to "set aside current work and do something else for a bit".
+                Shows all branches in the repository.
+                Branches are "work forks" used to manage multiple versions of the same project simultaneously.
+                Select a branch and press <KeyBadge>Enter</KeyBadge> to check it out.
               </p>
             </div>
           </div>

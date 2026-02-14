@@ -27,31 +27,55 @@ export default function RemoteConnections() {
 
           <SectionHeading id="remote-connect" level={3}>원격 서버에 연결하기</SectionHeading>
           <p className="text-zinc-400 mb-4">
-            터미널에서 cokacdir를 실행할 때 서버 주소를 함께 입력합니다:
+            cokacdir를 먼저 실행한 뒤, 앱 안에서 <KeyBadge>/</KeyBadge> 키(경로 이동)를 눌러 원격 서버 주소를 입력합니다.
+            형식은 SSH 스타일의 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">사용자@서버주소:/경로</code>입니다.
           </p>
-          <div className="bg-bg-card border border-zinc-800 rounded-lg p-4 mb-4 font-mono text-sm space-y-2">
-            <div>
-              <span className="text-zinc-500">$ </span>
-              <span className="text-accent-cyan">cokacdir sftp://사용자이름@서버주소:/경로</span>
-            </div>
-          </div>
-          <p className="text-zinc-400 mb-4">실제 예시:</p>
-          <div className="bg-bg-card border border-zinc-800 rounded-lg p-4 mb-6 font-mono text-sm space-y-2">
-            <div>
-              <span className="text-zinc-500"># 서버의 홈 폴더에 접속</span>
-            </div>
-            <div>
-              <span className="text-zinc-500">$ </span>
-              <span className="text-accent-cyan">cokacdir sftp://john@myserver.com:/home/john</span>
-            </div>
-            <div className="mt-2">
-              <span className="text-zinc-500"># 포트 번호를 지정해서 접속 (기본은 22번)</span>
-            </div>
-            <div>
-              <span className="text-zinc-500">$ </span>
-              <span className="text-accent-cyan">cokacdir sftp://john@myserver.com:2222:/home/john</span>
-            </div>
-          </div>
+          <StepByStep steps={[
+            {
+              title: 'cokacdir를 실행합니다',
+              description: '터미널에서 cokacdir를 먼저 실행합니다.',
+            },
+            {
+              title: '/ 키를 눌러 경로 입력창을 엽니다',
+              description: (
+                <span>
+                  <KeyBadge>/</KeyBadge>를 누르면 경로를 입력할 수 있는 입력창이 나타납니다.
+                </span>
+              ),
+            },
+            {
+              title: '원격 서버 주소를 입력합니다',
+              description: (
+                <div>
+                  <p className="mb-2">아래와 같은 형식으로 입력합니다:</p>
+                  <div className="bg-bg-elevated border border-zinc-800 rounded-lg p-3 font-mono text-sm space-y-2">
+                    <div>
+                      <span className="text-zinc-500"># 기본 형식</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">사용자이름@서버주소:/경로</span>
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-zinc-500"># 예: 서버의 홈 폴더에 접속</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">john@myserver.com:/home/john</span>
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-zinc-500"># 포트 번호를 지정 (기본은 22번)</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">john@myserver.com:2222:/home/john</span>
+                    </div>
+                  </div>
+                </div>
+              ),
+            },
+            {
+              title: 'Enter를 누르면 연결됩니다',
+              description: '처음 접속하는 서버라면 인증 정보(비밀번호 또는 SSH 키)를 묻는 화면이 나타납니다. 입력하면 서버에 연결되어 원격 파일을 탐색할 수 있습니다.',
+            },
+          ]} />
 
           <SectionHeading id="remote-usage" level={3}>원격 파일 다루기</SectionHeading>
           <p className="text-zinc-400 mb-4">
@@ -78,8 +102,12 @@ export default function RemoteConnections() {
           </p>
           <StepByStep steps={[
             {
-              title: '첫 번째 패널은 원격 서버에 연결된 상태입니다',
-              description: 'cokacdir를 sftp://... 로 시작해서 서버 파일을 보고 있습니다.',
+              title: '한 패널에서 원격 서버에 연결합니다',
+              description: (
+                <span>
+                  <KeyBadge>/</KeyBadge>를 눌러 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">user@host:/path</code> 형식으로 서버에 접속합니다.
+                </span>
+              ),
             },
             {
               title: '0을 눌러 두 번째 패널을 엽니다',
@@ -105,10 +133,8 @@ export default function RemoteConnections() {
           ]} />
 
           <TipBox>
-            원격 접속이 원활하려면 SSH 키가 설정되어 있어야 합니다.
-            SSH 키는 비밀번호 대신 사용하는 인증 방식으로, 매번 비밀번호를 입력하지 않아도 됩니다.
-            <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded ml-1">~/.ssh/config</code> 파일에
-            서버 정보를 미리 설정해두면 더 편리합니다.
+            한번 접속한 서버는 프로필로 저장할 수 있어서, 다음에 <KeyBadge>/</KeyBadge>를 눌렀을 때 저장된 서버 목록에서 바로 선택할 수 있습니다.
+            비밀번호 인증과 SSH 키 파일 인증 모두 지원합니다.
           </TipBox>
         </>
       ) : (
@@ -126,31 +152,55 @@ export default function RemoteConnections() {
 
           <SectionHeading id="remote-connect" level={3}>Connecting to a Remote Server</SectionHeading>
           <p className="text-zinc-400 mb-4">
-            Include the server address when launching cokacdir from the terminal:
+            First launch cokacdir, then press <KeyBadge>/</KeyBadge> (Go to Path) and type the remote server address.
+            The format is SSH-style: <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">user@host:/path</code>.
           </p>
-          <div className="bg-bg-card border border-zinc-800 rounded-lg p-4 mb-4 font-mono text-sm space-y-2">
-            <div>
-              <span className="text-zinc-500">$ </span>
-              <span className="text-accent-cyan">cokacdir sftp://username@server-address:/path</span>
-            </div>
-          </div>
-          <p className="text-zinc-400 mb-4">Real examples:</p>
-          <div className="bg-bg-card border border-zinc-800 rounded-lg p-4 mb-6 font-mono text-sm space-y-2">
-            <div>
-              <span className="text-zinc-500"># Connect to server's home folder</span>
-            </div>
-            <div>
-              <span className="text-zinc-500">$ </span>
-              <span className="text-accent-cyan">cokacdir sftp://john@myserver.com:/home/john</span>
-            </div>
-            <div className="mt-2">
-              <span className="text-zinc-500"># Connect with a specific port (default is 22)</span>
-            </div>
-            <div>
-              <span className="text-zinc-500">$ </span>
-              <span className="text-accent-cyan">cokacdir sftp://john@myserver.com:2222:/home/john</span>
-            </div>
-          </div>
+          <StepByStep steps={[
+            {
+              title: 'Launch cokacdir',
+              description: 'Start cokacdir from the terminal first.',
+            },
+            {
+              title: 'Press / to open the path input',
+              description: (
+                <span>
+                  Press <KeyBadge>/</KeyBadge> to bring up the path input dialog.
+                </span>
+              ),
+            },
+            {
+              title: 'Type the remote server address',
+              description: (
+                <div>
+                  <p className="mb-2">Enter the address in this format:</p>
+                  <div className="bg-bg-elevated border border-zinc-800 rounded-lg p-3 font-mono text-sm space-y-2">
+                    <div>
+                      <span className="text-zinc-500"># Basic format</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">username@server-address:/path</span>
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-zinc-500"># Example: connect to server's home folder</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">john@myserver.com:/home/john</span>
+                    </div>
+                    <div className="mt-2">
+                      <span className="text-zinc-500"># With a specific port (default is 22)</span>
+                    </div>
+                    <div>
+                      <span className="text-accent-cyan">john@myserver.com:2222:/home/john</span>
+                    </div>
+                  </div>
+                </div>
+              ),
+            },
+            {
+              title: 'Press Enter to connect',
+              description: 'If this is a new server, you\'ll be prompted for authentication (password or SSH key). Once entered, you\'re connected and can browse remote files.',
+            },
+          ]} />
 
           <SectionHeading id="remote-usage" level={3}>Working with Remote Files</SectionHeading>
           <p className="text-zinc-400 mb-4">
@@ -177,8 +227,12 @@ export default function RemoteConnections() {
           </p>
           <StepByStep steps={[
             {
-              title: 'The first panel is connected to the remote server',
-              description: 'You launched cokacdir with sftp://... and are viewing server files.',
+              title: 'Connect to the remote server in one panel',
+              description: (
+                <span>
+                  Press <KeyBadge>/</KeyBadge> and type <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">user@host:/path</code> to connect.
+                </span>
+              ),
             },
             {
               title: 'Press 0 to open a second panel',
@@ -204,9 +258,8 @@ export default function RemoteConnections() {
           ]} />
 
           <TipBox>
-            For smooth remote access, set up SSH keys for authentication.
-            SSH keys replace password entry, so you don't have to type your password every time.
-            Pre-configuring server info in <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded ml-1">~/.ssh/config</code> makes it even more convenient.
+            Servers you've connected to can be saved as profiles, so next time you press <KeyBadge>/</KeyBadge>,
+            you can quickly select from saved servers. Both password and SSH key file authentication are supported.
           </TipBox>
         </>
       )}
