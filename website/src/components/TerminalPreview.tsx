@@ -215,12 +215,12 @@ export default function TerminalPreview() {
             <span className="text-xs text-zinc-500 ml-2 font-mono">cokacdir — ~/projects</span>
           </div>
           {/* Scene indicator dots */}
-          <div className="flex gap-1.5">
+          <div className="flex gap-1 sm:gap-1.5">
             {labels.map((label, i) => (
               <button
                 key={i}
                 onClick={() => setActive(i)}
-                className={`px-2 py-0.5 rounded text-[10px] font-mono transition-colors ${
+                className={`px-1.5 sm:px-2 py-0.5 rounded text-[9px] sm:text-[10px] font-mono transition-colors ${
                   i === active
                     ? 'bg-accent-cyan/20 text-accent-cyan'
                     : 'text-zinc-600 hover:text-zinc-400'

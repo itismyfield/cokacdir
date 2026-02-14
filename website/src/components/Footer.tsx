@@ -1,4 +1,4 @@
-import { Github, FileText, Cpu, BookOpen, GraduationCap } from 'lucide-react'
+import { Github, FileText, Cpu, GraduationCap } from 'lucide-react'
 import { Link } from 'react-router-dom'
 
 export default function Footer() {
@@ -13,7 +13,7 @@ export default function Footer() {
           </div>
 
           {/* Links */}
-          <div className="flex items-center gap-6">
+          <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-6">
             <a
               href="https://github.com/kstost/cokacdir"
               target="_blank"
@@ -34,15 +34,6 @@ export default function Footer() {
               <GraduationCap className="w-5 h-5" />
               <span className="text-sm">Tutorial</span>
             </Link>
-            <a
-              href="https://github.com/kstost/cokacdir#readme"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors"
-            >
-              <BookOpen className="w-5 h-5" />
-              <span className="text-sm">Documentation</span>
-            </a>
             <a
               href="https://github.com/kstost/cokacdir/blob/main/LICENSE"
               target="_blank"

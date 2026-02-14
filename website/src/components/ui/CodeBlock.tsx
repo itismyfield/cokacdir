@@ -25,15 +25,17 @@ export default function CodeBlock({ code, showCopy = true }: CodeBlockProps) {
       className="relative group bg-bg-card border border-zinc-800 rounded-lg overflow-hidden"
       whileHover={{ borderColor: 'rgba(0, 212, 255, 0.3)' }}
     >
-      <div className="flex items-center justify-between px-4 py-3">
-        <code className="font-mono text-accent-cyan text-sm sm:text-base">
-          <span className="text-zinc-500">$ </span>
-          {code}
-        </code>
+      <div className="flex items-center justify-between px-4 py-3 gap-2">
+        <div className="overflow-x-auto min-w-0 flex-1">
+          <code className="font-mono text-accent-cyan text-xs sm:text-base whitespace-nowrap">
+            <span className="text-zinc-500">$ </span>
+            {code}
+          </code>
+        </div>
         {showCopy && (
           <button
             onClick={handleCopy}
-            className="ml-4 p-2 rounded-md bg-bg-elevated hover:bg-zinc-700 transition-colors"
+            className="p-2 rounded-md bg-bg-elevated hover:bg-zinc-700 transition-colors shrink-0"
             aria-label="Copy to clipboard"
           >
             {copied ? (

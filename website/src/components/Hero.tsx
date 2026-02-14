@@ -15,17 +15,6 @@ export default function Hero() {
       <div className="absolute bottom-1/4 right-1/4 w-96 h-96 bg-accent-cyan/20 rounded-full blur-3xl animate-glow-pulse" style={{ animationDelay: '2s' }} />
 
       <div className="relative z-10 max-w-6xl mx-auto text-center">
-        {/* Badge */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.6 }}
-          className="inline-flex items-center gap-2 px-4 py-2 rounded-full bg-gradient-to-r from-accent-cyan/20 to-primary/20 border border-accent-cyan/50 mb-8"
-        >
-          <span className="text-lg">🤖</span>
-          <span className="text-sm text-accent-cyan font-semibold">Powered by Claude AI — Natural Language File Management</span>
-        </motion.div>
-
         {/* Main title */}
         <motion.h1
           initial={{ opacity: 0, y: 20 }}
@@ -53,7 +42,7 @@ export default function Hero() {
           initial={{ opacity: 0, y: 20 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.8, delay: 0.25 }}
-          className="text-lg text-zinc-400 mb-4"
+          className="text-base sm:text-lg text-zinc-400 mb-4"
         >
           An easy terminal explorer for vibe coders who are scared of the terminal
         </motion.p>
@@ -76,10 +65,10 @@ export default function Hero() {
           className="max-w-6xl mx-auto mb-8"
           id="install"
         >
-          <h2 className="text-3xl sm:text-4xl font-bold mb-4">
+          <h2 className="text-2xl sm:text-3xl md:text-4xl font-bold mb-4">
             Get Started in <span className="text-accent-cyan">Seconds</span>
           </h2>
-          <p className="text-zinc-400 text-lg mb-8">
+          <p className="text-zinc-400 text-base sm:text-lg mb-8">
             One command installation. No dependencies required.
           </p>
 
@@ -105,8 +94,8 @@ export default function Hero() {
           </div>
 
           {/* Optional AI setup */}
-          <div className="mt-12 p-6 rounded-xl border border-zinc-800 bg-bg-card text-left">
-            <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
+          <div className="mt-12 p-4 sm:p-6 rounded-xl border border-zinc-800 bg-bg-card text-left">
+            <h3 className="text-base sm:text-lg font-semibold mb-3 flex items-center gap-2">
               <span className="text-accent-purple">✨</span>
               Enable AI Commands (Optional)
             </h3>
@@ -128,7 +117,7 @@ export default function Hero() {
         >
           <Link
             to="/tutorial"
-            className="inline-flex items-center gap-2 px-6 py-3 rounded-lg bg-accent-cyan/10 border border-accent-cyan/30 text-accent-cyan font-semibold hover:bg-accent-cyan/20 hover:border-accent-cyan/50 transition-all duration-200"
+            className="inline-flex items-center gap-2 px-8 py-4 rounded-lg bg-accent-cyan text-bg-dark font-bold text-lg hover:bg-accent-cyan/90 shadow-lg shadow-accent-cyan/25 transition-all duration-200"
           >
             <BookOpen className="w-5 h-5" />
             Beginner Tutorial
