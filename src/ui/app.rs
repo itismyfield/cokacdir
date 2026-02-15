@@ -1386,6 +1386,9 @@ pub struct App {
     // Pending extract directory name (for focusing after completion)
     pub pending_extract_dir: Option<String>,
 
+    // Pending paste focus name (for focusing on first pasted file after completion)
+    pub pending_paste_focus: Option<String>,
+
     // Conflict resolution state for duplicate file handling
     pub conflict_state: Option<ConflictState>,
 
@@ -1483,6 +1486,7 @@ impl App {
             file_operation_progress: None,
             pending_tar_archive: None,
             pending_extract_dir: None,
+            pending_paste_focus: None,
             conflict_state: None,
             tar_exclude_state: None,
             copy_exclude_state: None,
@@ -1583,6 +1587,7 @@ impl App {
             file_operation_progress: None,
             pending_tar_archive: None,
             pending_extract_dir: None,
+            pending_paste_focus: None,
             conflict_state: None,
             tar_exclude_state: None,
             copy_exclude_state: None,
@@ -4151,6 +4156,11 @@ impl App {
                 let source_base = clipboard.source_path.display().to_string();
                 let target = target_path.display().to_string();
 
+                // Set pending focus to the first pasted file
+                if let Some(first) = clipboard.files.first() {
+                    self.pending_paste_focus = Some(first.clone());
+                }
+
                 let mut progress = FileOperationProgress::new(op_type);
                 progress.is_active = true;
                 progress.total_files = file_paths.len();
@@ -4221,6 +4231,11 @@ impl App {
             let file_paths: Vec<PathBuf> = valid_files.iter().map(PathBuf::from).collect();
             let source_base = clipboard.source_path.display().to_string();
             let target = target_path.display().to_string();
+
+            // Set pending focus to the first pasted file
+            if let Some(first) = valid_files.first() {
+                self.pending_paste_focus = Some(first.clone());
+            }
 
             let mut progress = FileOperationProgress::new(op_type);
             progress.is_active = true;
@@ -4441,6 +4456,11 @@ impl App {
 
     /// Execute paste operation (internal, called after conflict resolution or when no conflicts)
     fn execute_paste_operation(&mut self, clipboard: Clipboard, valid_files: Vec<String>, target_path: PathBuf) {
+        // Set pending focus to the first pasted file name
+        if let Some(first) = valid_files.first() {
+            self.pending_paste_focus = Some(first.clone());
+        }
+
         // Determine operation type for progress
         let operation_type = match clipboard.operation {
             ClipboardOperation::Copy => FileOperationType::Copy,
@@ -4543,6 +4563,13 @@ impl App {
         }
 
         let file_count = rename_map.len();
+
+        // Set pending focus to the first dup file name
+        if let Some((_, first_dest)) = rename_map.first() {
+            if let Some(name) = first_dest.file_name() {
+                self.pending_paste_focus = Some(name.to_string_lossy().to_string());
+            }
+        }
 
         // Start operation in background thread
         thread::spawn(move || {
@@ -4662,6 +4689,11 @@ impl App {
                 !files_to_skip.contains(&src)
             })
             .collect();
+
+        // Set pending focus to the first non-skipped file
+        if let Some(first) = files_to_process.first() {
+            self.pending_paste_focus = Some((*first).clone());
+        }
 
         if files_to_process.is_empty() {
             // All files were skipped - show message and restore clipboard if copy
