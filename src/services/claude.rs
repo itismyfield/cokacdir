@@ -6,6 +6,45 @@ use std::fs::OpenOptions;
 use regex::Regex;
 use serde_json::Value;
 
+/// Cached path to the claude binary.
+/// Once resolved, reused for all subsequent calls.
+static CLAUDE_PATH: OnceLock<Option<String>> = OnceLock::new();
+
+/// Resolve the path to the claude binary.
+/// First tries `which claude`, then falls back to `bash -lc "which claude"`
+/// (for non-interactive SSH sessions where ~/.profile isn't loaded).
+fn resolve_claude_path() -> Option<String> {
+    // Try direct `which claude` first
+    if let Ok(output) = Command::new("which").arg("claude").output() {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+    }
+
+    // Fallback: use login shell to resolve PATH
+    if let Ok(output) = Command::new("bash")
+        .args(["-lc", "which claude"])
+        .output()
+    {
+        if output.status.success() {
+            let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if !path.is_empty() {
+                return Some(path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Get the cached claude binary path, resolving it on first call.
+fn get_claude_path() -> Option<&'static str> {
+    CLAUDE_PATH.get_or_init(|| resolve_claude_path()).as_deref()
+}
+
 /// Debug logging helper (only active when COKACDIR_DEBUG=1)
 fn debug_log(msg: &str) {
     static ENABLED: OnceLock<bool> = OnceLock::new();
@@ -122,7 +161,19 @@ IMPORTANT: Format your responses using Markdown for better readability:
         args.push(sid.to_string());
     }
 
-    let mut child = match Command::new("claude")
+    let claude_bin = match get_claude_path() {
+        Some(path) => path,
+        None => {
+            return ClaudeResponse {
+                success: false,
+                response: None,
+                session_id: None,
+                error: Some("Claude CLI not found. Is Claude CLI installed?".to_string()),
+            };
+        }
+    };
+
+    let mut child = match Command::new(claude_bin)
         .args(&args)
         .current_dir(working_dir)
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
@@ -226,13 +277,7 @@ pub fn is_claude_available() -> bool {
 
     #[cfg(unix)]
     {
-        match Command::new("which")
-            .arg("claude")
-            .output()
-        {
-            Ok(output) => output.status.success(),
-            Err(_) => false,
-        }
+        get_claude_path().is_some()
     }
 }
 
@@ -304,8 +349,14 @@ IMPORTANT: Format your responses using Markdown for better readability:
         args.push(sid.to_string());
     }
 
+    let claude_bin = get_claude_path()
+        .ok_or_else(|| {
+            debug_log("ERROR: Claude CLI not found");
+            "Claude CLI not found. Is Claude CLI installed?".to_string()
+        })?;
+
     debug_log("--- Spawning claude process ---");
-    debug_log(&format!("Command: claude"));
+    debug_log(&format!("Command: {}", claude_bin));
     debug_log(&format!("Args count: {}", args.len()));
     for (i, arg) in args.iter().enumerate() {
         if arg.len() > 100 {
@@ -319,7 +370,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log("Env: BASH_MAX_TIMEOUT_MS=86400000");
 
     let spawn_start = std::time::Instant::now();
-    let mut child = Command::new("claude")
+    let mut child = Command::new(claude_bin)
         .args(&args)
         .current_dir(working_dir)
         .env("CLAUDE_CODE_MAX_OUTPUT_TOKENS", "64000")
