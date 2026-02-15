@@ -11,6 +11,7 @@ use ratatui::{
     Frame,
 };
 
+use crate::keybindings::GotoAction;
 use crate::services::file_ops::FileOperationType;
 use crate::utils::format::{safe_suffix, safe_prefix};
 
@@ -1527,7 +1528,10 @@ fn draw_goto_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t
                 if !remote_groups.contains_key(&key) {
                     remote_group_order.push(key.clone());
                 }
-                remote_groups.entry(key).or_default().push(display);
+                let group = remote_groups.entry(key).or_default();
+                if !group.contains(&display) {
+                    group.push(display);
+                }
             }
         }
 
@@ -1571,13 +1575,17 @@ fn draw_goto_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, t
 
         // 북마크 모드 도움말
         let help_line = if has_bookmarks {
+            let del_key = app.keybindings.goto_first_key(GotoAction::BookmarkDelete);
+            let edit_key = app.keybindings.goto_first_key(GotoAction::BookmarkEdit);
             Line::from(vec![
                 Span::styled("↑↓", help_key_style),
                 Span::styled(":select ", help_label_style),
                 Span::styled("Enter", help_key_style),
                 Span::styled(":go ", help_label_style),
-                Span::styled("^d", help_key_style),
+                Span::styled(del_key.to_string(), help_key_style),
                 Span::styled(":del ", help_label_style),
+                Span::styled(edit_key.to_string(), help_key_style),
+                Span::styled(":edit ", help_label_style),
                 Span::styled("Esc", help_key_style),
                 Span::styled(":cancel", help_label_style),
             ])
@@ -2577,8 +2585,8 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
         }
 
         // selection 상태에서의 특수 처리 (모드 분기 이전에 처리)
-        // Ctrl+D(삭제), Ctrl+E(편집)는 북마크/프로필 조작용이므로 selection 처리를 건너뜀
-        if dialog.selection.is_some() && !(modifiers.contains(KeyModifiers::CONTROL) && matches!(code, KeyCode::Char('d') | KeyCode::Char('e'))) {
+        // 북마크 삭제/편집 단축키는 selection 처리를 건너뜀
+        if dialog.selection.is_some() && app.keybindings.goto_action(code, modifiers).is_none() {
             match code {
                 KeyCode::Char(c) => {
                     // 선택 범위 삭제 후 새 문자 입력
@@ -2901,7 +2909,10 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
                     if !remote_groups.contains_key(&key) {
                         remote_group_order.push(key.clone());
                     }
-                    remote_groups.entry(key).or_default().push((display, Some(idx)));
+                    let group = remote_groups.entry(key).or_default();
+                    if !group.iter().any(|(entry, _)| *entry == display) {
+                        group.push((display, Some(idx)));
+                    }
                 }
             }
 
@@ -3072,96 +3083,115 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
                 KeyCode::End => {
                     dialog.cursor_pos = dialog.input.chars().count();
                 }
-                KeyCode::Char('d') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+D: Delete selected bookmark or profile
-                    if has_bookmarks {
-                        if let Some(Some(profile_idx)) = remote_profile_map.get(selected_idx) {
-                            // 프로필 삭제: 관련 원격 북마크가 있으면 하나를 프로필로 흡수
-                            let profile_idx = *profile_idx;
-                            if let Some(profile) = app.settings.remote_profiles.get(profile_idx) {
-                                let user = profile.user.clone();
-                                let host = profile.host.clone();
-                                let port = profile.port;
+                KeyCode::Char(c) if app.keybindings.goto_action(code, modifiers).is_some() => {
+                    let action = app.keybindings.goto_action(code, modifiers).unwrap();
+                    match action {
+                        GotoAction::BookmarkDelete => {
+                            // Delete selected bookmark or profile
+                            if has_bookmarks {
+                                if let Some(Some(profile_idx)) = remote_profile_map.get(selected_idx) {
+                                    let profile_idx = *profile_idx;
+                                    if let Some(profile) = app.settings.remote_profiles.get(profile_idx) {
+                                        let user = profile.user.clone();
+                                        let host = profile.host.clone();
+                                        let port = profile.port;
 
-                                // 같은 user@host:port를 참조하는 북마크 찾기
-                                let related_bookmark_pos = app.settings.bookmarked_path.iter().position(|bm| {
-                                    if let Some((bu, bh, bp, _)) = crate::services::remote::parse_remote_path(bm) {
-                                        bu == user && bh == host && bp == port
-                                    } else {
-                                        false
-                                    }
-                                });
+                                        let related_bookmark_pos = app.settings.bookmarked_path.iter().position(|bm| {
+                                            if let Some((bu, bh, bp, _)) = crate::services::remote::parse_remote_path(bm) {
+                                                bu == user && bh == host && bp == port
+                                            } else {
+                                                false
+                                            }
+                                        });
 
-                                if let Some(pos) = related_bookmark_pos {
-                                    // 북마크의 경로를 프로필의 default_path로 이전
-                                    if let Some((_, _, _, path)) = crate::services::remote::parse_remote_path(&app.settings.bookmarked_path[pos]) {
-                                        app.settings.remote_profiles[profile_idx].default_path = path;
+                                        if let Some(pos) = related_bookmark_pos {
+                                            if let Some((_, _, _, path)) = crate::services::remote::parse_remote_path(&app.settings.bookmarked_path[pos]) {
+                                                app.settings.remote_profiles[profile_idx].default_path = path;
+                                            }
+                                            app.settings.bookmarked_path.remove(pos);
+                                        } else {
+                                            app.settings.remote_profiles.remove(profile_idx);
+                                        }
+                                        let _ = app.settings.save();
                                     }
-                                    app.settings.bookmarked_path.remove(pos);
-                                } else {
-                                    // 관련 북마크 없음 → 프로필 삭제
-                                    app.settings.remote_profiles.remove(profile_idx);
+                                } else if let Some(entry) = mixed_entries.get(selected_idx) {
+                                    let entry = entry.clone();
+                                    if let Some(pos) = app.settings.bookmarked_path.iter().position(|p| *p == entry) {
+                                        app.settings.bookmarked_path.remove(pos);
+                                        // 원격 북마크인 경우, 동일 경로를 가진 프로필의 default_path도 정리
+                                        if let Some((user, host, port, path)) = crate::services::remote::parse_remote_path(&entry) {
+                                            if let Some(pidx) = app.settings.remote_profiles.iter().position(|p| {
+                                                p.user == user && p.host == host && p.port == port && p.default_path == path
+                                            }) {
+                                                // 같은 서버의 다른 북마크가 있으면 그 경로로 교체
+                                                let other_path = app.settings.bookmarked_path.iter().find_map(|bm| {
+                                                    if let Some((bu, bh, bp, bp_path)) = crate::services::remote::parse_remote_path(bm) {
+                                                        if bu == user && bh == host && bp == port {
+                                                            return Some(bp_path);
+                                                        }
+                                                    }
+                                                    None
+                                                });
+                                                if let Some(other_path) = other_path {
+                                                    app.settings.remote_profiles[pidx].default_path = other_path;
+                                                } else {
+                                                    app.settings.remote_profiles.remove(pidx);
+                                                }
+                                            }
+                                        }
+                                        let _ = app.settings.save();
+                                    }
                                 }
-                                let _ = app.settings.save();
-                            }
-                        } else if let Some(entry) = mixed_entries.get(selected_idx) {
-                            // 북마크 삭제 (로컬 또는 원격)
-                            let entry = entry.clone();
-                            if let Some(pos) = app.settings.bookmarked_path.iter().position(|p| *p == entry) {
-                                app.settings.bookmarked_path.remove(pos);
-                                let _ = app.settings.save();
-                            }
-                        }
-                        // 선택 인덱스 조정
-                        if let Some(ref mut completion) = dialog.completion {
-                            if completion.selected_index > 0 {
-                                completion.selected_index -= 1;
-                            }
-                        }
-                    }
-                }
-                KeyCode::Char('e') if modifiers.contains(KeyModifiers::CONTROL) => {
-                    // Ctrl+E: Edit selected remote entry in RemoteConnect dialog
-                    if has_bookmarks {
-                        if let Some(Some(profile_idx)) = remote_profile_map.get(selected_idx) {
-                            // Remote profile entry — use index directly
-                            if let Some(profile) = app.settings.remote_profiles.get(*profile_idx).cloned() {
-                                let state = RemoteConnectState::from_profile(&profile, *profile_idx);
-                                let msg = format!("Edit: {}@{}:{}", profile.user, profile.host, profile.port);
-                                app.remote_connect_state = Some(state);
-                                app.dialog = Some(Dialog {
-                                    dialog_type: DialogType::RemoteConnect,
-                                    input: String::new(),
-                                    cursor_pos: 0,
-                                    message: msg,
-                                    completion: None,
-                                    selected_button: 0,
-                                    selection: None,
-                                });
-                            }
-                        } else if let Some(entry) = mixed_entries.get(selected_idx) {
-                            // Remote bookmark entry — find matching profile
-                            if let Some((user, host, port, _path)) = crate::services::remote::parse_remote_path(entry) {
-                                if let Some((idx, profile)) = app.settings.remote_profiles.iter().enumerate()
-                                    .find(|(_, p)| p.user == user && p.host == host && p.port == port)
-                                {
-                                    let profile = profile.clone();
-                                    let state = RemoteConnectState::from_profile(&profile, idx);
-                                    let msg = format!("Edit: {}@{}:{}", profile.user, profile.host, profile.port);
-                                    app.remote_connect_state = Some(state);
-                                    app.dialog = Some(Dialog {
-                                        dialog_type: DialogType::RemoteConnect,
-                                        input: String::new(),
-                                        cursor_pos: 0,
-                                        message: msg,
-                                        completion: None,
-                                        selected_button: 0,
-                                        selection: None,
-                                    });
+                                if let Some(ref mut completion) = dialog.completion {
+                                    if completion.selected_index > 0 {
+                                        completion.selected_index -= 1;
+                                    }
                                 }
                             }
                         }
+                        GotoAction::BookmarkEdit => {
+                            // Edit selected remote entry in RemoteConnect dialog
+                            if has_bookmarks {
+                                if let Some(Some(profile_idx)) = remote_profile_map.get(selected_idx) {
+                                    if let Some(profile) = app.settings.remote_profiles.get(*profile_idx).cloned() {
+                                        let state = RemoteConnectState::from_profile(&profile, *profile_idx);
+                                        let msg = format!("Edit: {}@{}:{}", profile.user, profile.host, profile.port);
+                                        app.remote_connect_state = Some(state);
+                                        app.dialog = Some(Dialog {
+                                            dialog_type: DialogType::RemoteConnect,
+                                            input: String::new(),
+                                            cursor_pos: 0,
+                                            message: msg,
+                                            completion: None,
+                                            selected_button: 0,
+                                            selection: None,
+                                        });
+                                    }
+                                } else if let Some(entry) = mixed_entries.get(selected_idx) {
+                                    if let Some((user, host, port, _path)) = crate::services::remote::parse_remote_path(entry) {
+                                        if let Some((idx, profile)) = app.settings.remote_profiles.iter().enumerate()
+                                            .find(|(_, p)| p.user == user && p.host == host && p.port == port)
+                                        {
+                                            let profile = profile.clone();
+                                            let state = RemoteConnectState::from_profile(&profile, idx);
+                                            let msg = format!("Edit: {}@{}:{}", profile.user, profile.host, profile.port);
+                                            app.remote_connect_state = Some(state);
+                                            app.dialog = Some(Dialog {
+                                                dialog_type: DialogType::RemoteConnect,
+                                                input: String::new(),
+                                                cursor_pos: 0,
+                                                message: msg,
+                                                completion: None,
+                                                selected_button: 0,
+                                                selection: None,
+                                            });
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
+                    let _ = c; // suppress unused variable warning
                 }
                 KeyCode::Char(c) => {
                     // '/' 또는 '~' 입력 시 경로 모드로 전환 (입력이 비어있을 때만)
@@ -4481,19 +4511,9 @@ fn handle_remote_connect_input(app: &mut App, code: KeyCode) -> bool {
                         app.settings.remote_profiles[idx] = profile;
                         let _ = app.settings.save();
                     }
-                } else {
-                    // New connection — auto-save profile
-                    if app.active_panel().is_remote() {
-                        let existing = app.settings.remote_profiles.iter()
-                            .position(|p| p.host == profile.host && p.user == profile.user && p.port == profile.port);
-                        if let Some(idx) = existing {
-                            app.settings.remote_profiles[idx] = profile;
-                        } else {
-                            app.settings.remote_profiles.push(profile);
-                        }
-                        let _ = app.settings.save();
-                    }
                 }
+                // New connection profile saving is handled in the connection success handler
+                // (RemoteSpinnerResult::Connected) to avoid async timing issues
             }
             return false;
         }

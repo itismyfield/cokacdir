@@ -819,6 +819,22 @@ pub fn default_ai_screen_keybindings() -> HashMap<AIScreenAction, Vec<String>> {
     m
 }
 
+// ─── Goto dialog context ────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GotoAction {
+    BookmarkDelete,
+    BookmarkEdit,
+}
+
+pub fn default_goto_keybindings() -> HashMap<GotoAction, Vec<String>> {
+    let mut m = HashMap::new();
+    m.insert(GotoAction::BookmarkDelete, vec!["//Delete bookmark or profile".into(), "ctrl+d".into()]);
+    m.insert(GotoAction::BookmarkEdit, vec!["//Edit remote profile".into(), "ctrl+e".into()]);
+    m
+}
+
 // ─── JSON config & runtime container ───────────────────────────────────
 
 /// JSON-serializable keybindings configuration.
@@ -852,6 +868,8 @@ pub struct KeybindingsConfig {
     pub process_manager: HashMap<ProcessManagerAction, Vec<String>>,
     #[serde(default = "default_ai_screen_keybindings")]
     pub ai_screen: HashMap<AIScreenAction, Vec<String>>,
+    #[serde(default = "default_goto_keybindings")]
+    pub goto: HashMap<GotoAction, Vec<String>>,
 }
 
 impl Default for KeybindingsConfig {
@@ -869,6 +887,7 @@ impl Default for KeybindingsConfig {
             image_viewer: default_image_viewer_keybindings(),
             process_manager: default_process_manager_keybindings(),
             ai_screen: default_ai_screen_keybindings(),
+            goto: default_goto_keybindings(),
         }
     }
 }
@@ -894,6 +913,7 @@ pub struct Keybindings {
     image_viewer: ActionMap<ImageViewerAction>,
     process_manager: ActionMap<ProcessManagerAction>,
     ai_screen: ActionMap<AIScreenAction>,
+    goto: ActionMap<GotoAction>,
 }
 
 impl Keybindings {
@@ -911,6 +931,7 @@ impl Keybindings {
             image_viewer: ActionMap::build(&default_image_viewer_keybindings(), &config.image_viewer),
             process_manager: ActionMap::build(&default_process_manager_keybindings(), &config.process_manager),
             ai_screen: ActionMap::build(&default_ai_screen_keybindings(), &config.ai_screen),
+            goto: ActionMap::build(&default_goto_keybindings(), &config.goto),
         }
     }
 
@@ -999,6 +1020,13 @@ impl Keybindings {
     }
     pub fn ai_screen_first_key(&self, action: AIScreenAction) -> &str { self.ai_screen.first_key(action) }
     pub fn ai_screen_keys_joined(&self, action: AIScreenAction, sep: &str) -> String { self.ai_screen.keys_joined(action, sep) }
+
+    // ── Goto dialog ──
+    pub fn goto_action(&self, code: KeyCode, modifiers: KeyModifiers) -> Option<GotoAction> {
+        self.goto.lookup(code, modifiers)
+    }
+    pub fn goto_first_key(&self, action: GotoAction) -> &str { self.goto.first_key(action) }
+    pub fn goto_keys_joined(&self, action: GotoAction, sep: &str) -> String { self.goto.keys_joined(action, sep) }
 }
 
 // ─── Tests ─────────────────────────────────────────────────────────────

@@ -6134,6 +6134,31 @@ impl App {
                             ctx.status = ConnectionStatus::Connected;
                         }
                         panel.apply_remote_entries(success.entries, &PathBuf::from(&success.path));
+
+                        // Auto-save profile and bookmark on first connection to this server
+                        let already_has_profile = self.settings.remote_profiles.iter()
+                            .any(|p| p.user == success.profile.user && p.host == success.profile.host && p.port == success.profile.port);
+                        let already_bookmarked = self.settings.bookmarked_path.iter().any(|bm| {
+                            if let Some((bu, bh, bp, _)) = remote::parse_remote_path(bm) {
+                                bu == success.profile.user && bh == success.profile.host && bp == success.profile.port
+                            } else {
+                                false
+                            }
+                        });
+                        let mut settings_changed = false;
+                        if !already_has_profile {
+                            self.settings.remote_profiles.push(success.profile.clone());
+                            settings_changed = true;
+                        }
+                        if !already_bookmarked {
+                            let bookmark_path = remote::format_remote_display(&success.profile, &success.path);
+                            self.settings.bookmarked_path.push(bookmark_path);
+                            settings_changed = true;
+                        }
+                        if settings_changed {
+                            let _ = self.settings.save();
+                        }
+
                         if let Some(msg) = success.fallback_msg {
                             self.show_extension_handler_error(&msg);
                         } else {
