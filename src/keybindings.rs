@@ -295,6 +295,8 @@ pub enum PanelAction {
     GitScreen,
     ToggleBookmark,
     SetHandler,
+    EncryptAll,
+    DecryptAll,
     #[cfg(target_os = "macos")]
     OpenInFinder,
     #[cfg(target_os = "macos")]
@@ -368,6 +370,10 @@ pub fn default_panel_keybindings() -> HashMap<PanelAction, Vec<String>> {
     m.insert(PanelAction::GitScreen, vec!["//Git screen".into(), "g".into()]);
     m.insert(PanelAction::GitLogDiff, vec!["//Git log diff".into(), "7".into()]);
     m.insert(PanelAction::StartDiff, vec!["//Start diff".into(), "8".into()]);
+
+    // Encryption
+    m.insert(PanelAction::EncryptAll, vec!["//Encrypt all files in directory".into(), "shift+e".into()]);
+    m.insert(PanelAction::DecryptAll, vec!["//Decrypt all .cokacenc files".into(), "shift+d".into()]);
 
     // macOS only
     #[cfg(target_os = "macos")]

@@ -14,6 +14,8 @@ pub enum FileOperationType {
     Tar,
     Untar,
     Download,
+    Encrypt,
+    Decrypt,
 }
 
 /// Progress message for file operations

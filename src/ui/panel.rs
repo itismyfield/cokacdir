@@ -77,7 +77,10 @@ pub fn draw(frame: &mut Frame, panel: &mut PanelState, area: Rect, is_active: bo
 
     // Calculate max file name width (including marker and icon = 2 chars)
     let max_name_display_width = panel.files.iter()
-        .map(|f| f.name.width() + 2) // +2 for marker and icon
+        .map(|f| {
+            let name = f.display_name.as_deref().unwrap_or(&f.name);
+            name.width() + 2 // +2 for marker and icon
+        })
         .max()
         .unwrap_or(0);
 
@@ -352,20 +355,21 @@ fn create_file_line(
 
     // Truncate name if needed using unicode display width
     let effective_name_width = name_width.saturating_sub(2);
+    let name_str = file.display_name.as_deref().unwrap_or(&file.name);
     let display_name = if effective_name_width < 4 {
         String::new()
     } else {
-        let name_display_width = file.name.width();
+        let name_display_width = name_str.width();
         if name_display_width > effective_name_width {
             let truncate_width = effective_name_width.saturating_sub(3);
             if truncate_width > 0 {
-                let truncated = truncate_to_display_width(&file.name, truncate_width);
+                let truncated = truncate_to_display_width(name_str, truncate_width);
                 format!("{}...", truncated)
             } else {
                 "...".to_string()
             }
         } else {
-            file.name.clone()
+            name_str.to_string()
         }
     };
 
@@ -377,8 +381,10 @@ fn create_file_line(
     let type_col_str = if type_width > 0 {
         let type_str = if file.is_directory || file.name == ".." {
             String::new()
+        } else if file.name.ends_with(crate::enc::naming::EXT) {
+            "\u{1F511}".to_string()
         } else {
-            std::path::Path::new(&file.name)
+            std::path::Path::new(name_str)
                 .extension()
                 .and_then(|e| e.to_str())
                 .map(|e| {

@@ -249,6 +249,8 @@ fn build_help_content(theme: &Theme, kb: &Keybindings) -> Vec<Line<'static>> {
     lines.push(pk(PanelAction::Tar, "Create tar archive"));
     lines.push(pk(PanelAction::SetHandler, "Set/Edit file handler"));
     lines.push(pk(PanelAction::Delete, "Delete file(s)"));
+    lines.push(pk(PanelAction::EncryptAll, "Encrypt all files (AES-256)"));
+    lines.push(pk(PanelAction::DecryptAll, "Decrypt .cokacenc files"));
     lines.push(pk(PanelAction::Search, "Find/search files"));
     #[cfg(target_os = "macos")]
     {

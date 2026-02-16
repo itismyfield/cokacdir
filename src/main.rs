@@ -3,6 +3,7 @@ mod services;
 mod utils;
 mod config;
 mod keybindings;
+mod enc;
 
 use std::io;
 use std::env;
@@ -480,6 +481,8 @@ fn run_app<B: ratatui::backend::Backend>(
                             crate::services::file_ops::FileOperationType::Tar => "Archived",
                             crate::services::file_ops::FileOperationType::Untar => "Extracted",
                             crate::services::file_ops::FileOperationType::Download => "Downloaded",
+                            crate::services::file_ops::FileOperationType::Encrypt => "Encrypted",
+                            crate::services::file_ops::FileOperationType::Decrypt => "Decrypted",
                         };
                         let total = result.success_count + result.failure_count;
                         if result.failure_count == 0 {
@@ -815,6 +818,8 @@ fn handle_panel_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers) -> 
             PanelAction::GitScreen => app.show_git_screen(),
             PanelAction::ToggleBookmark => app.toggle_bookmark(),
             PanelAction::SetHandler => app.show_handler_dialog(),
+            PanelAction::EncryptAll => app.show_encrypt_dialog(),
+            PanelAction::DecryptAll => app.show_decrypt_dialog(),
             #[cfg(target_os = "macos")]
             PanelAction::OpenInFinder => app.open_in_finder(),
             #[cfg(target_os = "macos")]

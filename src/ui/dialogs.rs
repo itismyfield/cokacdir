@@ -271,7 +271,8 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
     // 다이얼로그 타입별 크기 설정
     // Y좌표는 max_height 기준 고정, 실제 높이는 동적
     let (width, height, max_height) = match dialog.dialog_type {
-        DialogType::Delete | DialogType::LargeImageConfirm | DialogType::LargeFileConfirm | DialogType::TrueColorWarning => {
+        DialogType::Delete | DialogType::LargeImageConfirm | DialogType::LargeFileConfirm | DialogType::TrueColorWarning
+        | DialogType::EncryptConfirm | DialogType::DecryptConfirm => {
             (SIMPLE_DIALOG_WIDTH, CONFIRM_DIALOG_HEIGHT, CONFIRM_DIALOG_HEIGHT)
         }
         DialogType::ExtensionHandlerError => {
@@ -381,6 +382,12 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
     match dialog.dialog_type {
         DialogType::Delete => {
             draw_confirm_dialog(frame, dialog, dialog_area, theme, " Delete ");
+        }
+        DialogType::EncryptConfirm => {
+            draw_confirm_dialog(frame, dialog, dialog_area, theme, " Encrypt ");
+        }
+        DialogType::DecryptConfirm => {
+            draw_confirm_dialog(frame, dialog, dialog_area, theme, " Decrypt ");
         }
         DialogType::LargeImageConfirm => {
             draw_confirm_dialog(frame, dialog, dialog_area, theme, " Large Image ");
@@ -1615,6 +1622,8 @@ fn draw_progress_dialog(frame: &mut Frame, app: &App, area: Rect, theme: &Theme)
         FileOperationType::Tar => " Creating Archive ",
         FileOperationType::Untar => " Extracting Archive ",
         FileOperationType::Download => " Downloading ",
+        FileOperationType::Encrypt => " Encrypting ",
+        FileOperationType::Decrypt => " Decrypting ",
     };
 
     let block = Block::default()
@@ -2319,6 +2328,52 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
                         if dialog.selected_button == 0 {
                             app.dialog = None;
                             app.execute_delete();
+                        } else {
+                            app.dialog = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            DialogType::EncryptConfirm => {
+                match code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        app.dialog = None;
+                        app.execute_encrypt();
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        app.dialog = None;
+                    }
+                    KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                        dialog.selected_button = 1 - dialog.selected_button;
+                    }
+                    KeyCode::Enter => {
+                        if dialog.selected_button == 0 {
+                            app.dialog = None;
+                            app.execute_encrypt();
+                        } else {
+                            app.dialog = None;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            DialogType::DecryptConfirm => {
+                match code {
+                    KeyCode::Char('y') | KeyCode::Char('Y') => {
+                        app.dialog = None;
+                        app.execute_decrypt();
+                    }
+                    KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                        app.dialog = None;
+                    }
+                    KeyCode::Left | KeyCode::Right | KeyCode::Tab => {
+                        dialog.selected_button = 1 - dialog.selected_button;
+                    }
+                    KeyCode::Enter => {
+                        if dialog.selected_button == 0 {
+                            app.dialog = None;
+                            app.execute_decrypt();
                         } else {
                             app.dialog = None;
                         }

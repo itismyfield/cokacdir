@@ -243,9 +243,10 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, theme: &Theme) {
 
     let left_text = if let Some(file) = current_file {
         if file.name != ".." {
+            let name = file.display_name.as_deref().unwrap_or(&file.name);
             format!(
                 "{} ({})",
-                file.name,
+                name,
                 crate::utils::format::format_size(file.size)
             )
         } else {
