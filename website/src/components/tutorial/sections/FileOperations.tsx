@@ -167,6 +167,41 @@ export default function FileOperations() {
             </div>
           </div>
 
+          <SectionHeading id="file-encryption" level={3}>파일 암호화 / 복호화</SectionHeading>
+          <p className="text-zinc-400 mb-4 leading-relaxed">
+            현재 디렉토리의 모든 파일을 AES-256으로 암호화하거나, 암호화된 파일을 복호화할 수 있습니다.
+            암호화된 파일은 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">.cokacenc</code> 확장자로 저장되며,
+            큰 파일은 지정한 크기로 분할됩니다.
+          </p>
+          <div className="space-y-4 mb-6">
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-3 mb-2">
+                <KeyBadge>Shift+E</KeyBadge>
+                <span className="text-white font-semibold">암호화</span>
+              </div>
+              <p className="text-zinc-400 text-sm">
+                현재 디렉토리의 모든 파일을 암호화합니다.
+                분할 크기(MB)를 입력할 수 있으며, 기본값은 1800MB입니다.
+                0을 입력하면 분할 없이 단일 파일로 암호화됩니다.
+                암호화 후 원본 파일은 삭제됩니다.
+              </p>
+            </div>
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-3 mb-2">
+                <KeyBadge>Shift+D</KeyBadge>
+                <span className="text-white font-semibold">복호화</span>
+              </div>
+              <p className="text-zinc-400 text-sm">
+                현재 디렉토리의 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">.cokacenc</code> 파일들을
+                원본 파일로 복원합니다. 복호화 후 암호화 파일은 삭제됩니다.
+              </p>
+            </div>
+          </div>
+          <TipBox>
+            암호화 키는 처음 사용 시 자동으로 생성되어 <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">~/.cokacdir/</code>에 저장됩니다.
+            이 키 파일을 분실하면 암호화된 파일을 복구할 수 없으니 반드시 백업하세요.
+          </TipBox>
+
           <TipBox>
             가장 자주 쓰는 키 3개만 기억하세요: <KeyBadge>Ctrl+C</KeyBadge> 복사, <KeyBadge>Ctrl+V</KeyBadge> 붙여넣기, <KeyBadge>X</KeyBadge> 삭제.
             나머지는 필요할 때 이 페이지를 참고하면 됩니다.
@@ -420,6 +455,41 @@ export default function FileOperations() {
               </p>
             </div>
           </div>
+
+          <SectionHeading id="file-encryption" level={3}>File Encryption / Decryption</SectionHeading>
+          <p className="text-zinc-400 mb-4 leading-relaxed">
+            You can encrypt all files in the current directory with AES-256, or decrypt previously encrypted files.
+            Encrypted files are saved with the <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">.cokacenc</code> extension,
+            and large files are split into chunks of a configurable size.
+          </p>
+          <div className="space-y-4 mb-6">
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-3 mb-2">
+                <KeyBadge>Shift+E</KeyBadge>
+                <span className="text-white font-semibold">Encrypt</span>
+              </div>
+              <p className="text-zinc-400 text-sm">
+                Encrypts all files in the current directory.
+                You can specify the split size in MB (default: 1800MB).
+                Enter 0 for no splitting (single encrypted file).
+                Original files are deleted after encryption.
+              </p>
+            </div>
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-3 mb-2">
+                <KeyBadge>Shift+D</KeyBadge>
+                <span className="text-white font-semibold">Decrypt</span>
+              </div>
+              <p className="text-zinc-400 text-sm">
+                Restores <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">.cokacenc</code> files
+                in the current directory back to their original files. Encrypted files are deleted after decryption.
+              </p>
+            </div>
+          </div>
+          <TipBox>
+            The encryption key is automatically generated on first use and stored in <code className="text-accent-cyan font-mono bg-bg-elevated px-1 py-0.5 rounded">~/.cokacdir/</code>.
+            Be sure to back up this key file — if lost, encrypted files cannot be recovered.
+          </TipBox>
 
           <TipBox>
             Just remember 3 keys: <KeyBadge>Ctrl+C</KeyBadge> copy, <KeyBadge>Ctrl+V</KeyBadge> paste, <KeyBadge>X</KeyBadge> delete.

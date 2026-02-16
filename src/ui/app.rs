@@ -766,6 +766,7 @@ pub struct Dialog {
     pub completion: Option<PathCompletion>,  // 경로 자동완성용
     pub selected_button: usize,  // 버튼 선택 인덱스 (0: Yes, 1: No)
     pub selection: Option<(usize, usize)>,  // 선택 범위 (start, end) - None이면 선택 없음
+    pub use_md5: bool,  // MD5 검증 옵션 (EncryptConfirm에서 사용)
 }
 
 #[derive(Debug, Clone)]
@@ -1729,6 +1730,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -2057,6 +2059,7 @@ impl App {
                             completion: None,
                             selected_button: 1, // Default to "No"
                             selection: None,
+                            use_md5: false,
                         });
                     } else {
                         self.pending_large_file = Some(path);
@@ -2068,6 +2071,7 @@ impl App {
                             completion: None,
                             selected_button: 1, // Default to "No"
                             selection: None,
+                            use_md5: false,
                         });
                     }
                 } else if is_image {
@@ -2082,6 +2086,7 @@ impl App {
                             completion: None,
                             selected_button: 1, // Default to "No"
                             selection: None,
+                            use_md5: false,
                         });
                     } else {
                         self.image_viewer_state = Some(
@@ -2105,6 +2110,7 @@ impl App {
                             completion: None,
                             selected_button: 0, // 0: Set mode (no existing handler)
                             selection: None,
+                            use_md5: false,
                         });
                     } else {
                         // Text file - open editor
@@ -2363,6 +2369,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -2417,6 +2424,7 @@ impl App {
             completion: None,
             selected_button: if is_edit_mode { 1 } else { 0 }, // 0: Set, 1: Edit
             selection,
+            use_md5: false,
         });
     }
 
@@ -2864,6 +2872,7 @@ impl App {
                             completion: None,
                             selected_button: 1, // Default to "No"
                             selection: None,
+                            use_md5: false,
                         });
                         return;
                     }
@@ -2886,6 +2895,7 @@ impl App {
                             completion: None,
                             selected_button: 1, // Default to "No"
                             selection: None,
+                            use_md5: false,
                         });
                         return;
                     }
@@ -3021,6 +3031,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3097,6 +3108,7 @@ impl App {
             completion: Some(PathCompletion::default()),
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3128,6 +3140,7 @@ impl App {
             completion: Some(PathCompletion::default()),
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3150,6 +3163,7 @@ impl App {
             completion: None,
             selected_button: 1,  // 기본값: No (안전을 위해)
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3185,6 +3199,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3218,10 +3233,11 @@ impl App {
             completion: None,
             selected_button: 1,  // Default: No
             selection: None,
+            use_md5: false,
         });
     }
 
-    pub fn execute_encrypt(&mut self, split_size_mb: u64) {
+    pub fn execute_encrypt(&mut self, split_size_mb: u64, use_md5: bool) {
         let key_path = match crate::enc::ensure_key() {
             Ok(p) => p,
             Err(e) => {
@@ -3240,7 +3256,7 @@ impl App {
         progress.receiver = Some(rx);
 
         thread::spawn(move || {
-            crate::enc::pack_directory_with_progress(&dir, &key_path, tx, cancel_flag, split_size_mb);
+            crate::enc::pack_directory_with_progress(&dir, &key_path, tx, cancel_flag, split_size_mb, use_md5);
         });
 
         self.file_operation_progress = Some(progress);
@@ -3252,6 +3268,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3286,6 +3303,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3298,6 +3316,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3310,6 +3329,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3345,6 +3365,7 @@ impl App {
                     completion: None,
                     selected_button: 0,
                     selection: Some((0, selection_end)),
+                    use_md5: false,
                 });
             } else {
                 self.show_message("Select a file to rename");
@@ -3378,6 +3399,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3390,6 +3412,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3404,6 +3427,7 @@ impl App {
             completion: Some(PathCompletion::default()),
             selected_button: 0,
             selection: Some((0, len)),  // 전체 선택
+            use_md5: false,
         });
     }
 
@@ -3516,6 +3540,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3706,6 +3731,7 @@ impl App {
                 completion: None,
                 selected_button: 0,
                 selection: None,
+                use_md5: false,
             });
             return;
         }
@@ -3872,6 +3898,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -3940,6 +3967,7 @@ impl App {
                     completion: None,
                     selected_button: 0,
                     selection: None,
+                    use_md5: false,
                 });
                 return;
             }
@@ -4105,6 +4133,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -4348,6 +4377,7 @@ impl App {
                     completion: None,
                     selected_button: 0,
                     selection: None,
+                    use_md5: false,
                 });
 
                 // Keep clipboard for copy, consume for cut
@@ -4425,6 +4455,7 @@ impl App {
                 completion: None,
                 selected_button: 0,
                 selection: None,
+                use_md5: false,
             });
 
             // Keep clipboard for copy, consume for cut
@@ -4609,6 +4640,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
     }
 
@@ -4677,6 +4709,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
 
         // Keep clipboard for copy operations (can paste multiple times)
@@ -4808,6 +4841,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
 
         // Keep clipboard for copy operations
@@ -4922,6 +4956,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
 
         // Keep clipboard for copy operations (can paste multiple times)
@@ -5250,6 +5285,7 @@ impl App {
                 completion: None,
                 selected_button: 0,
                 selection: None,
+                use_md5: false,
             });
             return;
         }
@@ -5307,6 +5343,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
 
         // Clone tar_path from settings for use in background thread
@@ -5680,6 +5717,7 @@ impl App {
             completion: None,
             selected_button: 0,
             selection: None,
+            use_md5: false,
         });
 
         // Clone tar_path from settings for use in background thread
@@ -6085,6 +6123,7 @@ impl App {
                 completion: None,
                 selected_button: 0,
                 selection: None,
+                use_md5: false,
             });
         }
     }

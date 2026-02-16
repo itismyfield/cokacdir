@@ -596,6 +596,7 @@ pub fn handle_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
                     completion: None,
                     selected_button: 1,
                     selection: None,
+                    use_md5: false,
                 });
             }
         }

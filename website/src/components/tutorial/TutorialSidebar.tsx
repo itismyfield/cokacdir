@@ -24,6 +24,7 @@ const tocItems: TocItem[] = [
   { id: 'create-rename', en: 'Create / Rename', ko: '만들기/이름 바꾸기', indent: true },
   { id: 'clipboard', en: 'Copy / Paste', ko: '복사/붙여넣기', indent: true },
   { id: 'delete-archive', en: 'Delete / Archive', ko: '삭제/압축', indent: true },
+  { id: 'file-encryption', en: 'Encrypt / Decrypt', ko: '암호화/복호화', indent: true },
   { id: 'extension-handler', en: 'File Handlers (U)', ko: '파일 열기 프로그램 (U)', indent: true },
   { id: 'search-find', en: 'Search Files', ko: '파일 검색하기' },
   { id: 'file-editor', en: 'File Editor', ko: '파일 편집하기' },

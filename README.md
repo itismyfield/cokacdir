@@ -17,6 +17,7 @@ Multi-panel terminal file manager with AI-powered natural language commands.
 - **Diff Compare**: Side-by-side folder and file comparison
 - **Git Integration**: Built-in git status, commit, log, branch management and inter-commit diff
 - **Remote SSH/SFTP**: Browse remote servers via SSH/SFTP with saved profiles
+- **File Encryption**: AES-256 encryption with configurable chunk splitting
 - **Customizable Themes**: Light/Dark themes with full color customization
 
 ## Installation

@@ -126,6 +126,18 @@ pub fn parse_enc_filename(path: &Path) -> Option<EncFileInfo> {
     })
 }
 
+/// Check if a group_id already exists in the directory.
+pub fn group_id_exists(dir: &Path, group_id: &str) -> bool {
+    std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .any(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            name.ends_with(EXT) && name.contains(group_id)
+        })
+}
+
 /// Group .cokacenc files by group_id, sorted by seq_index.
 pub fn group_enc_files(dir: &Path) -> Result<BTreeMap<String, Vec<EncFileInfo>>, CokacencError> {
     let mut groups: BTreeMap<String, Vec<EncFileInfo>> = BTreeMap::new();

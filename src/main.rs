@@ -556,6 +556,7 @@ fn run_app<B: ratatui::backend::Backend>(
                                     completion: None,
                                     selected_button: 1,
                                     selection: None,
+                                    use_md5: false,
                                 });
                             } else {
                                 app.image_viewer_state = Some(

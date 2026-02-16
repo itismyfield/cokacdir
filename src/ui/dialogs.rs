@@ -303,9 +303,11 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
 
             (w, h, max_h)
         }
-        DialogType::Search | DialogType::Mkdir | DialogType::Mkfile | DialogType::Rename | DialogType::Tar
-        | DialogType::EncryptConfirm => {
+        DialogType::Search | DialogType::Mkdir | DialogType::Mkfile | DialogType::Rename | DialogType::Tar => {
             (SIMPLE_DIALOG_WIDTH, SIMPLE_INPUT_HEIGHT, SIMPLE_INPUT_HEIGHT)
+        }
+        DialogType::EncryptConfirm => {
+            (SIMPLE_DIALOG_WIDTH, 7, 7)
         }
         DialogType::Progress => {
             (SIMPLE_DIALOG_WIDTH, PROGRESS_DIALOG_HEIGHT, PROGRESS_DIALOG_HEIGHT)
@@ -965,6 +967,22 @@ fn draw_simple_input_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, them
         );
         let input_area = Rect::new(inner.x + 1, inner.y + 2, inner.width - 2, 1);
         frame.render_widget(Paragraph::new(input_line), input_area);
+
+        // MD5 toggle for EncryptConfirm
+        if dialog.dialog_type == DialogType::EncryptConfirm {
+            let md5_label = if dialog.use_md5 {
+                "  Tab: MD5 verification [ON]"
+            } else {
+                "  Tab: MD5 verification [OFF]"
+            };
+            let md5_style = if dialog.use_md5 {
+                Style::default().fg(theme.dialog.text).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(theme.dialog.text).add_modifier(Modifier::DIM)
+            };
+            let md5_area = Rect::new(inner.x + 1, inner.y + 4, inner.width - 2, 1);
+            frame.render_widget(Paragraph::new(md5_label).style(md5_style), md5_area);
+        }
     } else {
         // 수직 중앙에 배치
         let y_pos = inner.y + inner.height / 2;
@@ -2503,6 +2521,12 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
                     }
                 }
 
+                // Tab: toggle MD5 for EncryptConfirm
+                if code == KeyCode::Tab && dialog.dialog_type == DialogType::EncryptConfirm {
+                    dialog.use_md5 = !dialog.use_md5;
+                    return false;
+                }
+
                 match code {
                     KeyCode::Enter => {
                         let input = dialog.input.clone();
@@ -2557,10 +2581,11 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
                                 }
                                 return false;
                             }
+                            let use_md5 = app.dialog.as_ref().map_or(false, |d| d.use_md5);
                             match trimmed.parse::<u64>() {
                                 Ok(split_size_mb) => {
                                     app.dialog = None;
-                                    app.execute_encrypt(split_size_mb);
+                                    app.execute_encrypt(split_size_mb, use_md5);
                                 }
                                 Err(_) => {
                                     if let Some(ref mut d) = app.dialog {
@@ -3225,6 +3250,7 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
                                             completion: None,
                                             selected_button: 0,
                                             selection: None,
+                                            use_md5: false,
                                         });
                                     }
                                 } else if let Some(entry) = mixed_entries.get(selected_idx) {
@@ -3244,6 +3270,7 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
                                                 completion: None,
                                                 selected_button: 0,
                                                 selection: None,
+                                                use_md5: false,
                                             });
                                         }
                                     }
@@ -4976,6 +5003,8 @@ mod tests {
             message: "Copy files".to_string(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
+            selection: None,
+            use_md5: false,
         };
 
         assert_eq!(dialog.dialog_type, DialogType::Copy);
@@ -4999,6 +5028,8 @@ mod tests {
             message: String::new(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
+            selection: None,
+            use_md5: false,
         };
 
         update_path_suggestions(&mut dialog);
@@ -5024,6 +5055,8 @@ mod tests {
             message: String::new(),
             completion: Some(PathCompletion::default()),
             selected_button: 0,
+            selection: None,
+            use_md5: false,
         };
 
         update_path_suggestions(&mut dialog);

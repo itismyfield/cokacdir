@@ -94,7 +94,7 @@ export default function AllInOne() {
                 <div className="text-4xl sm:text-5xl font-extrabold gradient-text mb-3">cokacdir</div>
                 <div className="text-zinc-400 text-sm">All-in-one terminal file manager</div>
                 <div className="mt-4 flex flex-wrap justify-center gap-2">
-                  {['Files', 'Editor', 'Git', 'Diff', 'Process', 'SSH', 'AI'].map((tag) => (
+                  {['Files', 'Editor', 'Git', 'Diff', 'Process', 'SSH', 'Encrypt', 'AI'].map((tag) => (
                     <span key={tag} className="px-2 py-1 bg-accent-cyan/10 border border-accent-cyan/20 rounded text-xs text-accent-cyan">
                       {tag}
                     </span>

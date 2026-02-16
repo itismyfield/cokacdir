@@ -1,5 +1,5 @@
 import { motion } from 'framer-motion'
-import { Columns, Search, Image, Bookmark, Wifi, Eye, Settings2, Activity, ArrowLeftRight, GitBranch, GitCommit, Keyboard } from 'lucide-react'
+import { Columns, Search, Image, Bookmark, Wifi, Eye, Settings2, Activity, ArrowLeftRight, GitBranch, GitCommit, Keyboard, Lock } from 'lucide-react'
 
 interface SubFeature {
   icon: typeof Columns
@@ -41,6 +41,7 @@ const pillars: Pillar[] = [
       { icon: Keyboard, label: 'Customizable keybindings' },
       { icon: Settings2, label: 'Custom file handlers' },
       { icon: Activity, label: 'Process manager' },
+      { icon: Lock, label: 'AES-256 file encryption' },
     ],
   },
   {

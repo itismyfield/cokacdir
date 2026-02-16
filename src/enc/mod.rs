@@ -60,7 +60,7 @@ struct FileInfo {
     permissions: u32,
 }
 
-fn gather_file_info(path: &Path) -> Result<FileInfo, CokacencError> {
+fn gather_file_info(path: &Path, use_md5: bool) -> Result<FileInfo, CokacencError> {
     let metadata = fs::metadata(path)?;
     let size = metadata.len();
 
@@ -78,17 +78,21 @@ fn gather_file_info(path: &Path) -> Result<FileInfo, CokacencError> {
     #[cfg(not(unix))]
     let permissions = 0u32;
 
-    // Compute MD5 (first pass)
-    let file = File::open(path)?;
-    let mut reader = BufReader::new(file);
-    let mut hasher = Md5::new();
-    let mut buf = [0u8; READ_BUF_SIZE];
-    loop {
-        let n = reader.read(&mut buf)?;
-        if n == 0 { break; }
-        hasher.update(&buf[..n]);
-    }
-    let md5 = format!("{:032x}", hasher.finalize());
+    let md5 = if use_md5 {
+        // Compute MD5 (first pass)
+        let file = File::open(path)?;
+        let mut reader = BufReader::new(file);
+        let mut hasher = Md5::new();
+        let mut buf = [0u8; READ_BUF_SIZE];
+        loop {
+            let n = reader.read(&mut buf)?;
+            if n == 0 { break; }
+            hasher.update(&buf[..n]);
+        }
+        format!("{:032x}", hasher.finalize())
+    } else {
+        String::new()
+    };
 
     Ok(FileInfo { size, md5, modified, permissions })
 }
@@ -251,6 +255,7 @@ pub fn pack_directory_with_progress(
     tx: Sender<ProgressMessage>,
     cancel_flag: Arc<AtomicBool>,
     split_size_mb: u64,
+    use_md5: bool,
 ) {
     let password = match load_key_file(key_path) {
         Ok(p) => p,
@@ -304,7 +309,7 @@ pub fn pack_directory_with_progress(
 
         let _ = tx.send(ProgressMessage::FileStarted(name.clone()));
 
-        match pack_file(&path, &name, dir, &password, split_size) {
+        match pack_file(&path, &name, dir, &password, split_size, use_md5) {
             Ok(_) => {
                 // Delete original after successful encryption
                 if let Err(e) = fs::remove_file(&path) {
@@ -337,11 +342,17 @@ fn pack_file(
     out_dir: &Path,
     password: &[u8],
     split_size: u64,
+    use_md5: bool,
 ) -> Result<(), CokacencError> {
     // ── Pass 1: gather info ──
-    let info = gather_file_info(file_path)?;
+    let info = gather_file_info(file_path, use_md5)?;
 
-    let group_id = naming::generate_group_id();
+    let group_id = loop {
+        let id = naming::generate_group_id();
+        if !naming::group_id_exists(out_dir, &id) {
+            break id;
+        }
+    };
     let kp = naming::key_prefix(password);
     let total_chunks = if info.size == 0 {
         1
@@ -569,7 +580,7 @@ fn unpack_file_group(
             let _ = tx.send(ProgressMessage::FileStarted(original_name.clone()));
         } else {
             // Cross-check metadata consistency across chunks
-            if meta.filename != original_name || meta.file_md5 != expected_md5 {
+            if meta.filename != original_name || (!expected_md5.is_empty() && meta.file_md5 != expected_md5) {
                 let _ = fs::remove_file(&temp_path);
                 return Err(CokacencError::MetadataParse(
                     "Inconsistent metadata across chunks".to_string(),
@@ -581,9 +592,9 @@ fn unpack_file_group(
     file_writer.flush()?;
     drop(file_writer);
 
-    // Verify MD5
+    // Verify MD5 (skip if MD5 was not computed during encryption)
     let md5_hex = format!("{:032x}", md5_hasher.finalize());
-    if md5_hex != expected_md5 {
+    if !expected_md5.is_empty() && md5_hex != expected_md5 {
         let _ = fs::remove_file(&temp_path);
         return Err(CokacencError::Md5Mismatch {
             expected: expected_md5,
