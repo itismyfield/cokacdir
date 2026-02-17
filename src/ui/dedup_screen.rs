@@ -8,7 +8,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -121,8 +121,6 @@ pub fn draw(frame: &mut Frame, state: &mut DedupScreenState, area: Rect, theme: 
     state.poll();
 
     let colors = &theme.dedup_screen;
-
-    frame.render_widget(Clear, area);
 
     // Main layout: info(5) + log(min) + footer(1)
     let chunks = Layout::default()

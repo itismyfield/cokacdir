@@ -846,7 +846,7 @@ pub struct DiffFileViewColorsJson {
     pub footer_text: u8,
 }
 
-#[derive(Debug, Deserialize, Default)]
+#[derive(Debug, Deserialize)]
 pub struct GitScreenColorsJson {
     #[serde(default = "default_234")]
     pub bg: u8,
@@ -902,7 +902,23 @@ pub struct GitScreenColorsJson {
     pub diff_header: u8,
 }
 
-#[derive(Debug, Deserialize, Default)]
+impl Default for GitScreenColorsJson {
+    fn default() -> Self {
+        Self {
+            bg: 234, border: 102, header_branch: 108, header_path: 188,
+            tab_active: 110, tab_inactive: 102, tab_bar_bg: 235,
+            file_staged: 108, file_modified: 180, file_untracked: 174,
+            file_deleted: 167, selected_bg: 239, selected_text: 195,
+            footer_key: 146, footer_text: 102, commit_input_border: 102,
+            commit_input_text: 188, log_hash: 146, log_message: 188,
+            log_author: 110, log_date: 102, branch_current: 108,
+            branch_normal: 188, diff_add: 108, diff_remove: 174,
+            diff_header: 110,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
 pub struct DedupScreenColorsJson {
     #[serde(default = "default_234")]
     pub bg: u8,
@@ -930,6 +946,17 @@ pub struct DedupScreenColorsJson {
     pub footer_key: u8,
     #[serde(default = "default_102")]
     pub footer_text: u8,
+}
+
+impl Default for DedupScreenColorsJson {
+    fn default() -> Self {
+        Self {
+            bg: 234, border: 102, title: 110, phase_text: 108,
+            stats_text: 188, progress_bar_fill: 108, progress_bar_empty: 236,
+            progress_text: 188, log_text: 188, log_deleted: 174,
+            log_error: 167, footer_key: 146, footer_text: 102,
+        }
+    }
 }
 
 // 기본값 함수들

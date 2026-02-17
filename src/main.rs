@@ -395,6 +395,8 @@ fn run_app<B: ratatui::backend::Backend>(
             && app.image_viewer_state.as_ref().map(|s| s.is_loading).unwrap_or(false);
         let is_diff_comparing = app.current_screen == Screen::DiffScreen
             && app.diff_state.as_ref().map(|s| s.is_comparing).unwrap_or(false);
+        let is_dedup_active = app.current_screen == Screen::DedupScreen
+            && app.dedup_screen_state.as_ref().map(|s| !s.is_complete).unwrap_or(false);
         let is_progress_active = app.file_operation_progress
             .as_ref()
             .map(|p| p.is_active)
@@ -405,7 +407,7 @@ fn run_app<B: ratatui::backend::Backend>(
             Duration::from_millis(16) // ~60fps for smooth progress bar updates
         } else if is_remote_spinner {
             Duration::from_millis(100) // Fast polling for spinner animation
-        } else if app.current_screen == Screen::AIScreen || app.is_ai_mode() || is_file_info_calculating || is_image_loading || is_diff_comparing {
+        } else if app.current_screen == Screen::AIScreen || app.is_ai_mode() || is_file_info_calculating || is_image_loading || is_diff_comparing || is_dedup_active {
             Duration::from_millis(100) // Fast polling for spinner animation
         } else {
             Duration::from_millis(250)
