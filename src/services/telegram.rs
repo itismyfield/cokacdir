@@ -18,6 +18,9 @@ struct ChatSession {
     session_id: Option<String>,
     current_path: Option<String>,
     history: Vec<HistoryItem>,
+    /// File upload records not yet sent to Claude AI.
+    /// Drained and prepended to the next user prompt so Claude knows about uploaded files.
+    pending_uploads: Vec<String>,
 }
 
 /// Bot-level settings persisted to disk
@@ -212,7 +215,8 @@ async fn handle_message(
     // Handle file/photo uploads
     if msg.document().is_some() || msg.photo().is_some() {
         let file_hint = if msg.document().is_some() { "document" } else { "photo" };
-        println!("  [{timestamp}] ◀ [{user_name}] Upload: {file_hint}");
+        let caption_hint = msg.caption().map(|c| format!(" + caption: \"{}\"", truncate_str(c, 40))).unwrap_or_default();
+        println!("  [{timestamp}] ◀ [{user_name}] Upload: {file_hint}{caption_hint}");
         let result = handle_file_upload(&bot, chat_id, &msg, &state).await;
         println!("  [{timestamp}] ▶ [{user_name}] Upload complete");
         return result;
@@ -236,6 +240,7 @@ async fn handle_message(
                         session_id: None,
                         current_path: None,
                         history: Vec::new(),
+                        pending_uploads: Vec::new(),
                     });
                     session.current_path = Some(last_path.clone());
                     if let Some((session_data, _)) = existing {
@@ -409,6 +414,7 @@ async fn handle_start_command(
             session_id: None,
             current_path: None,
             history: Vec::new(),
+            pending_uploads: Vec::new(),
         });
 
         if let Some((session_data, _)) = &existing {
@@ -604,6 +610,8 @@ async fn handle_down_command(
 }
 
 /// Handle file/photo upload - save to current session path
+/// If a caption is present, it is forwarded to Claude AI as a user message
+/// so the AI knows what to do with the uploaded file.
 async fn handle_file_upload(
     bot: &Bot,
     chat_id: ChatId,
@@ -657,13 +665,42 @@ async fn handle_file_upload(
 
     // Save to session path
     let dest = Path::new(&save_dir).join(&file_name);
+    let file_size = buf.len();
     match fs::write(&dest, &buf) {
         Ok(_) => {
-            let msg_text = format!("Saved: {}\n({} bytes)", dest.display(), buf.len());
+            let msg_text = format!("Saved: {}\n({} bytes)", dest.display(), file_size);
             bot.send_message(chat_id, &msg_text).await?;
         }
         Err(e) => {
             bot.send_message(chat_id, &format!("Failed to save file: {}", e)).await?;
+            return Ok(());
+        }
+    }
+
+    // Record upload in session history and pending queue for Claude
+    let upload_record = format!(
+        "[File uploaded] {} → {} ({} bytes)",
+        file_name, dest.display(), file_size
+    );
+    {
+        let mut data = state.lock().await;
+        if let Some(session) = data.sessions.get_mut(&chat_id) {
+            session.history.push(HistoryItem {
+                item_type: HistoryType::User,
+                content: upload_record.clone(),
+            });
+            session.pending_uploads.push(upload_record);
+            save_session_to_file(session, &save_dir);
+        }
+    }
+
+    // If the user included a caption with the file, treat it as a message to Claude AI
+    // so the user can upload a file and give instructions in one step.
+    // The pending_uploads will be prepended to the caption prompt automatically.
+    if let Some(caption) = msg.caption() {
+        let caption = caption.trim();
+        if !caption.is_empty() {
+            handle_text_message(bot, chat_id, caption, state).await?;
         }
     }
 
@@ -881,16 +918,20 @@ async fn handle_text_message(
     user_text: &str,
     state: &SharedState,
 ) -> ResponseResult<()> {
-    // Get session info and allowed tools (drop lock before any await)
-    let (session_info, allowed_tools) = {
-        let data = state.lock().await;
+    // Get session info, allowed tools, and pending uploads (drop lock before any await)
+    let (session_info, allowed_tools, pending_uploads) = {
+        let mut data = state.lock().await;
         let info = data.sessions.get(&chat_id).and_then(|session| {
             session.current_path.as_ref().map(|_| {
                 (session.session_id.clone(), session.current_path.clone().unwrap_or_default())
             })
         });
         let tools = data.settings.allowed_tools.clone();
-        (info, tools)
+        // Drain pending uploads so they are sent to Claude exactly once
+        let uploads = data.sessions.get_mut(&chat_id)
+            .map(|s| std::mem::take(&mut s.pending_uploads))
+            .unwrap_or_default();
+        (info, tools, uploads)
     };
 
     let (session_id, current_path) = match session_info {
@@ -913,8 +954,13 @@ async fn handle_text_message(
     // Sanitize input
     let sanitized_input = ai_screen::sanitize_user_input(user_text);
 
-    // Pass user input directly
-    let context_prompt = sanitized_input;
+    // Prepend pending file upload records so Claude knows about recently uploaded files
+    let context_prompt = if pending_uploads.is_empty() {
+        sanitized_input
+    } else {
+        let upload_context = pending_uploads.join("\n");
+        format!("{}\n\n{}", upload_context, sanitized_input)
+    };
 
     // Build disabled tools notice
     let default_tools: std::collections::HashSet<&str> = DEFAULT_ALLOWED_TOOLS.iter().copied().collect();
@@ -1012,7 +1058,7 @@ async fn handle_text_message(
             // Send typing action (lasts ~5 seconds, so send periodically)
             let _ = bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
 
-            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+            tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
             // Check cancel token again after sleep
             if cancel_token.cancelled.load(Ordering::Relaxed) {
@@ -1098,9 +1144,13 @@ async fn handle_text_message(
 
             if display_text != last_edit_text {
                 let html_text = markdown_to_telegram_html(&display_text);
-                let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_text)
+                if let Err(e) = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_text)
                     .parse_mode(ParseMode::Html)
-                    .await;
+                    .await
+                {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}]   ⚠ edit_message failed (streaming): {e}");
+                }
                 last_edit_text = display_text;
             }
         }
@@ -1137,12 +1187,37 @@ async fn handle_text_message(
             // Update placeholder message with partial response instead of deleting
             let html_stopped = markdown_to_telegram_html(&stopped_response);
             if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
-                let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
+                if let Err(e) = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
                     .parse_mode(ParseMode::Html)
-                    .await;
+                    .await
+                {
+                    let ts_err = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts_err}]   ⚠ edit_message failed (stopped/HTML): {e}");
+                    let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &stopped_response)
+                        .await;
+                }
             } else {
-                let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
-                let _ = send_long_message(&bot_owned, chat_id, &html_stopped, Some(ParseMode::Html)).await;
+                let send_result = send_long_message(&bot_owned, chat_id, &html_stopped, Some(ParseMode::Html)).await;
+                match send_result {
+                    Ok(_) => {
+                        let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
+                    }
+                    Err(e) => {
+                        let ts_err = chrono::Local::now().format("%H:%M:%S");
+                        println!("  [{ts_err}]   ⚠ send_long_message failed (stopped/HTML): {e}");
+                        let fallback = send_long_message(&bot_owned, chat_id, &stopped_response, None).await;
+                        match fallback {
+                            Ok(_) => {
+                                let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
+                            }
+                            Err(_) => {
+                                let truncated = truncate_str(&stopped_response, TELEGRAM_MSG_LIMIT);
+                                let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated)
+                                    .await;
+                            }
+                        }
+                    }
+                }
             }
 
             // Delete the "Stopping..." message (no longer needed)
@@ -1184,12 +1259,46 @@ async fn handle_text_message(
         let html_response = markdown_to_telegram_html(&full_response);
 
         if html_response.len() <= TELEGRAM_MSG_LIMIT {
-            let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_response)
+            // Try HTML first, fall back to plain text if it fails (e.g. parse error, rate limit)
+            if let Err(e) = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_response)
                 .parse_mode(ParseMode::Html)
-                .await;
+                .await
+            {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}]   ⚠ edit_message failed (HTML): {e}");
+                // Fallback: try plain text without HTML parse mode
+                let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &full_response)
+                    .await;
+            }
         } else {
-            let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
-            let _ = send_long_message(&bot_owned, chat_id, &html_response, Some(ParseMode::Html)).await;
+            // For long responses: send new messages FIRST, then delete placeholder.
+            // This prevents the scenario where placeholder is deleted but send fails,
+            // leaving the user with no response at all.
+            let send_result = send_long_message(&bot_owned, chat_id, &html_response, Some(ParseMode::Html)).await;
+            match send_result {
+                Ok(_) => {
+                    // New messages sent successfully, now safe to delete placeholder
+                    let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
+                }
+                Err(e) => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}]   ⚠ send_long_message failed (HTML): {e}");
+                    // Fallback: try plain text
+                    let fallback_result = send_long_message(&bot_owned, chat_id, &full_response, None).await;
+                    match fallback_result {
+                        Ok(_) => {
+                            let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
+                        }
+                        Err(e2) => {
+                            println!("  [{ts}]   ⚠ send_long_message failed (plain): {e2}");
+                            // Last resort: edit placeholder with truncated plain text
+                            let truncated = truncate_str(&full_response, TELEGRAM_MSG_LIMIT);
+                            let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated)
+                                .await;
+                        }
+                    }
+                }
+            }
         }
 
         // Clean up leftover "Stopping..." message if /stop raced with normal completion

@@ -340,6 +340,45 @@ export default function TelegramBot() {
               </p>
             </div>
 
+            {/* /stop */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/stop</code>
+                <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full">NEW</span>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                현재 진행 중인 AI 요청을 <strong className="text-white">즉시 중단</strong>합니다.
+                AI가 긴 작업을 수행하고 있거나, 잘못된 방향으로 진행되고 있을 때 사용합니다.
+              </p>
+              <p className="text-zinc-400 text-sm leading-relaxed mt-2">
+                중단하면 그때까지 생성된 부분 응답이 <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">[Stopped]</code> 표시와 함께 보존됩니다.
+                대화 히스토리에도 기록되므로 맥락이 유지됩니다.
+              </p>
+              <p className="text-zinc-400 text-sm leading-relaxed mt-2">
+                AI 응답이 진행 중이 아닐 때 <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">/stop</code>을 입력하면
+                "No active request to stop."이라고 안내됩니다.
+              </p>
+              <div className="bg-bg-elevated rounded p-3 mt-3 space-y-1 text-sm">
+                <p className="text-zinc-500 mb-2">사용 예시:</p>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">나:</span>
+                  <span className="text-zinc-300">이 프로젝트 전체를 리팩토링해줘</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">🕐 Processing...</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">나:</span>
+                  <code className="text-red-400 font-mono">/stop</code>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">(부분 응답) [Stopped]</span>
+                </div>
+              </div>
+            </div>
+
             {/* /clear */}
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
@@ -396,11 +435,69 @@ export default function TelegramBot() {
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
                 <span className="text-accent-cyan font-semibold">File / Photo Upload</span>
+                <span className="text-xs bg-accent-green/20 text-accent-green px-2 py-0.5 rounded-full">ENHANCED</span>
               </div>
               <p className="text-zinc-400 text-sm leading-relaxed">
                 Telegram에서 파일이나 사진을 보내면 현재 세션 경로에 자동으로 저장됩니다.
                 스마트폰의 사진이나 문서를 서버로 빠르게 전송할 때 유용합니다.
               </p>
+              <p className="text-zinc-400 text-sm leading-relaxed mt-2">
+                업로드된 파일 정보는 <strong className="text-white">AI 대화 맥락에 자동으로 기록</strong>됩니다.
+                따라서 파일을 업로드한 후 "방금 올린 파일 분석해줘"라고 말하면, AI가 파일의 이름과 경로를 자동으로 인지합니다.
+              </p>
+
+              <div className="bg-bg-elevated rounded p-3 mt-3 mb-3">
+                <p className="text-zinc-500 text-xs font-semibold mb-2">캡션(설명) 활용</p>
+                <p className="text-zinc-400 text-sm leading-relaxed">
+                  파일을 보낼 때 <strong className="text-white">캡션(설명)</strong>을 함께 입력하면,
+                  파일 저장 후 캡션이 AI에게 바로 전달됩니다.
+                  별도의 메시지를 보낼 필요 없이 <strong className="text-zinc-300">파일 업로드 + 지시를 한 번에</strong> 할 수 있습니다.
+                </p>
+              </div>
+
+              <div className="bg-bg-elevated rounded p-3 mb-3">
+                <p className="text-zinc-500 text-xs font-semibold mb-2">여러 파일 업로드</p>
+                <p className="text-zinc-400 text-sm leading-relaxed">
+                  여러 파일을 한 번에 보내도 모든 파일이 순서대로 저장되고 기록됩니다.
+                  이후 텍스트 메시지를 보내면 <strong className="text-zinc-300">모든 파일 정보가 한꺼번에</strong> AI에게 전달됩니다.
+                </p>
+              </div>
+
+              <div className="bg-bg-elevated rounded p-3 space-y-1 text-sm">
+                <p className="text-zinc-500 mb-2">사용 예시 1: 파일 먼저 업로드 → 이후 요청</p>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">나:</span>
+                  <span className="text-zinc-300">(data.csv 파일 전송)</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">Saved: /home/user/project/data.csv (1234 bytes)</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">나:</span>
+                  <span className="text-zinc-300">방금 올린 파일 분석해줘</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">(AI가 data.csv의 경로를 자동으로 인지하고 분석 수행)</span>
+                </div>
+              </div>
+
+              <div className="bg-bg-elevated rounded p-3 space-y-1 text-sm mt-3">
+                <p className="text-zinc-500 mb-2">사용 예시 2: 캡션과 함께 업로드 (한 번에 처리)</p>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">나:</span>
+                  <span className="text-zinc-300">(error_log.txt 전송 + 캡션: "이 로그에서 에러 원인을 찾아줘")</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">Saved: /home/user/project/error_log.txt (5678 bytes)</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">(AI가 즉시 error_log.txt를 읽고 에러 분석 시작)</span>
+                </div>
+              </div>
             </div>
 
             {/* 일반 텍스트 */}
@@ -618,10 +715,94 @@ export default function TelegramBot() {
             </div>
           </div>
 
-          {/* 워크플로우 5: Git 작업 */}
+          {/* 워크플로우 5: 파일 업로드 + AI 분석 */}
+          <div className="bg-bg-card border border-zinc-800 rounded-lg p-5 mb-4">
+            <h4 className="text-white font-semibold mb-3 flex items-center gap-2">
+              <span className="w-7 h-7 rounded-full bg-accent-green/20 text-accent-green text-sm flex items-center justify-center flex-shrink-0">5</span>
+              파일 업로드 후 AI에게 분석 요청하기
+              <span className="text-xs bg-accent-green/20 text-accent-green px-2 py-0.5 rounded-full">NEW</span>
+            </h4>
+            <p className="text-zinc-500 text-sm mb-3">파일을 업로드하면 AI가 자동으로 파일 정보를 인식합니다.</p>
+            <div className="space-y-2 text-sm">
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">나:</span>
+                <code className="text-accent-cyan font-mono">/start ~/my-project</code>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">Session started at /home/user/my-project.</span>
+              </div>
+              <p className="text-zinc-500 italic ml-16 mt-1">설정 파일 3개를 한꺼번에 업로드:</p>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">나:</span>
+                <span className="text-zinc-300">(config.json, .env, docker-compose.yml 파일 3개 전송)</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">Saved: .../config.json (512 bytes)</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">Saved: .../.env (128 bytes)</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">Saved: .../docker-compose.yml (2048 bytes)</span>
+              </div>
+              <p className="text-zinc-500 italic ml-16 mt-1">이후 AI에게 요청:</p>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">나:</span>
+                <span className="text-zinc-300">방금 올린 설정 파일들을 검토해서 문제가 있는지 확인해줘</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">(AI가 3개 파일을 모두 인지하고, 순서대로 읽어서 설정 오류 분석)</span>
+              </div>
+            </div>
+          </div>
+
+          {/* 워크플로우 6: /stop으로 AI 중단 */}
+          <div className="bg-bg-card border border-zinc-800 rounded-lg p-5 mb-4">
+            <h4 className="text-white font-semibold mb-3 flex items-center gap-2">
+              <span className="w-7 h-7 rounded-full bg-red-500/20 text-red-400 text-sm flex items-center justify-center flex-shrink-0">6</span>
+              AI 응답 중단하기
+              <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full">NEW</span>
+            </h4>
+            <p className="text-zinc-500 text-sm mb-3">AI가 잘못된 방향으로 진행될 때 즉시 중단하고 방향을 수정할 수 있습니다.</p>
+            <div className="space-y-2 text-sm">
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">나:</span>
+                <span className="text-zinc-300">이 프로젝트의 모든 파일을 TypeScript로 변환해줘</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">🕐 Processing...</span>
+              </div>
+              <p className="text-zinc-500 italic ml-16 mt-1">잘못된 요청이었다고 판단하여 중단:</p>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">나:</span>
+                <code className="text-red-400 font-mono">/stop</code>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">네, src/utils.js를 변환하겠습니다... [Stopped]</span>
+              </div>
+              <p className="text-zinc-500 italic ml-16 mt-1">방향 수정 후 다시 요청:</p>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">나:</span>
+                <span className="text-zinc-300">아니, src/utils.js 파일만 TypeScript로 변환해줘</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">(AI가 utils.js만 변환 수행)</span>
+              </div>
+            </div>
+          </div>
+
+          {/* 워크플로우 7: Git 작업 */}
           <div className="bg-bg-card border border-zinc-800 rounded-lg p-5 mb-6">
             <h4 className="text-white font-semibold mb-3 flex items-center gap-2">
-              <span className="w-7 h-7 rounded-full bg-accent-cyan/20 text-accent-cyan text-sm flex items-center justify-center flex-shrink-0">5</span>
+              <span className="w-7 h-7 rounded-full bg-accent-cyan/20 text-accent-cyan text-sm flex items-center justify-center flex-shrink-0">7</span>
               Git 상태 확인 및 관리
             </h4>
             <div className="space-y-2 text-sm">
@@ -992,6 +1173,45 @@ export default function TelegramBot() {
               </p>
             </div>
 
+            {/* /stop */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/stop</code>
+                <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full">NEW</span>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                <strong className="text-white">Immediately cancel</strong> the current AI request.
+                Use this when the AI is working on a long task or heading in the wrong direction.
+              </p>
+              <p className="text-zinc-400 text-sm leading-relaxed mt-2">
+                When stopped, the partial response generated so far is preserved with a <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">[Stopped]</code> indicator.
+                The interaction is recorded in conversation history, so context is maintained.
+              </p>
+              <p className="text-zinc-400 text-sm leading-relaxed mt-2">
+                If no AI request is in progress, typing <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">/stop</code> will show
+                "No active request to stop."
+              </p>
+              <div className="bg-bg-elevated rounded p-3 mt-3 space-y-1 text-sm">
+                <p className="text-zinc-500 mb-2">Example:</p>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">You:</span>
+                  <span className="text-zinc-300">Refactor the entire project</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">🕐 Processing...</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">You:</span>
+                  <code className="text-red-400 font-mono">/stop</code>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">(partial response) [Stopped]</span>
+                </div>
+              </div>
+            </div>
+
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
                 <code className="text-accent-cyan font-mono font-semibold">/clear</code>
@@ -1040,14 +1260,73 @@ export default function TelegramBot() {
               </code>
             </div>
 
+            {/* File Upload */}
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
               <div className="flex items-center gap-2 mb-2">
                 <span className="text-accent-cyan font-semibold">File / Photo Upload</span>
+                <span className="text-xs bg-accent-green/20 text-accent-green px-2 py-0.5 rounded-full">ENHANCED</span>
               </div>
               <p className="text-zinc-400 text-sm leading-relaxed">
                 Send a file or photo through Telegram and it will be automatically saved to the current session directory.
                 Useful for quickly transferring photos or documents from your smartphone to the server.
               </p>
+              <p className="text-zinc-400 text-sm leading-relaxed mt-2">
+                Upload information is <strong className="text-white">automatically recorded in the AI conversation context</strong>.
+                So after uploading a file, you can say "analyze the file I just uploaded" and the AI will automatically know the file name and path.
+              </p>
+
+              <div className="bg-bg-elevated rounded p-3 mt-3 mb-3">
+                <p className="text-zinc-500 text-xs font-semibold mb-2">Using Captions</p>
+                <p className="text-zinc-400 text-sm leading-relaxed">
+                  When sending a file, you can include a <strong className="text-white">caption (description)</strong>.
+                  After saving, the caption is immediately sent to AI as your message.
+                  This lets you <strong className="text-zinc-300">upload a file and give instructions in one step</strong> — no extra message needed.
+                </p>
+              </div>
+
+              <div className="bg-bg-elevated rounded p-3 mb-3">
+                <p className="text-zinc-500 text-xs font-semibold mb-2">Multiple File Upload</p>
+                <p className="text-zinc-400 text-sm leading-relaxed">
+                  Sending multiple files at once works seamlessly — all files are saved and recorded in order.
+                  When you send a text message afterwards, <strong className="text-zinc-300">all file information is delivered to AI at once</strong>.
+                </p>
+              </div>
+
+              <div className="bg-bg-elevated rounded p-3 space-y-1 text-sm">
+                <p className="text-zinc-500 mb-2">Example 1: Upload first, then ask</p>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">You:</span>
+                  <span className="text-zinc-300">(send data.csv)</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">Saved: /home/user/project/data.csv (1234 bytes)</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">You:</span>
+                  <span className="text-zinc-300">Analyze the file I just uploaded</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">(AI automatically knows the path and analyzes data.csv)</span>
+                </div>
+              </div>
+
+              <div className="bg-bg-elevated rounded p-3 space-y-1 text-sm mt-3">
+                <p className="text-zinc-500 mb-2">Example 2: Upload with caption (one step)</p>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">You:</span>
+                  <span className="text-zinc-300">(send error_log.txt + caption: "Find the error cause in this log")</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">Saved: /home/user/project/error_log.txt (5678 bytes)</span>
+                </div>
+                <div className="flex gap-3">
+                  <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                  <span className="text-zinc-400">(AI immediately reads error_log.txt and starts analysis)</span>
+                </div>
+              </div>
             </div>
 
             <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
@@ -1259,10 +1538,94 @@ export default function TelegramBot() {
             </div>
           </div>
 
-          {/* Workflow 5 */}
+          {/* Workflow 5: File Upload + AI Analysis */}
+          <div className="bg-bg-card border border-zinc-800 rounded-lg p-5 mb-4">
+            <h4 className="text-white font-semibold mb-3 flex items-center gap-2">
+              <span className="w-7 h-7 rounded-full bg-accent-green/20 text-accent-green text-sm flex items-center justify-center flex-shrink-0">5</span>
+              Upload Files and Ask AI to Analyze
+              <span className="text-xs bg-accent-green/20 text-accent-green px-2 py-0.5 rounded-full">NEW</span>
+            </h4>
+            <p className="text-zinc-500 text-sm mb-3">AI automatically recognizes uploaded file information.</p>
+            <div className="space-y-2 text-sm">
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">You:</span>
+                <code className="text-accent-cyan font-mono">/start ~/my-project</code>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">Session started at /home/user/my-project.</span>
+              </div>
+              <p className="text-zinc-500 italic ml-16 mt-1">Upload 3 config files at once:</p>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">You:</span>
+                <span className="text-zinc-300">(send config.json, .env, docker-compose.yml — 3 files)</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">Saved: .../config.json (512 bytes)</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">Saved: .../.env (128 bytes)</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">Saved: .../docker-compose.yml (2048 bytes)</span>
+              </div>
+              <p className="text-zinc-500 italic ml-16 mt-1">Then ask AI:</p>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">You:</span>
+                <span className="text-zinc-300">Review the config files I just uploaded and check for any issues</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">(AI recognizes all 3 files, reads them in order, and analyzes for config errors)</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Workflow 6: /stop */}
+          <div className="bg-bg-card border border-zinc-800 rounded-lg p-5 mb-4">
+            <h4 className="text-white font-semibold mb-3 flex items-center gap-2">
+              <span className="w-7 h-7 rounded-full bg-red-500/20 text-red-400 text-sm flex items-center justify-center flex-shrink-0">6</span>
+              Stopping an AI Response
+              <span className="text-xs bg-red-500/20 text-red-400 px-2 py-0.5 rounded-full">NEW</span>
+            </h4>
+            <p className="text-zinc-500 text-sm mb-3">Immediately stop the AI when it's heading in the wrong direction and correct course.</p>
+            <div className="space-y-2 text-sm">
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">You:</span>
+                <span className="text-zinc-300">Convert all files in this project to TypeScript</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">🕐 Processing...</span>
+              </div>
+              <p className="text-zinc-500 italic ml-16 mt-1">Realize the request was too broad, so stop it:</p>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">You:</span>
+                <code className="text-red-400 font-mono">/stop</code>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">OK, I'll convert src/utils.js... [Stopped]</span>
+              </div>
+              <p className="text-zinc-500 italic ml-16 mt-1">Correct the request and try again:</p>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">You:</span>
+                <span className="text-zinc-300">No, only convert src/utils.js to TypeScript</span>
+              </div>
+              <div className="flex gap-3">
+                <span className="text-zinc-500 flex-shrink-0 w-12">Bot:</span>
+                <span className="text-zinc-400">(AI converts only utils.js)</span>
+              </div>
+            </div>
+          </div>
+
+          {/* Workflow 7 */}
           <div className="bg-bg-card border border-zinc-800 rounded-lg p-5 mb-6">
             <h4 className="text-white font-semibold mb-3 flex items-center gap-2">
-              <span className="w-7 h-7 rounded-full bg-accent-cyan/20 text-accent-cyan text-sm flex items-center justify-center flex-shrink-0">5</span>
+              <span className="w-7 h-7 rounded-full bg-accent-cyan/20 text-accent-cyan text-sm flex items-center justify-center flex-shrink-0">7</span>
               Git Status and Management
             </h4>
             <div className="space-y-2 text-sm">
