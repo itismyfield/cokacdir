@@ -31,6 +31,7 @@ cbc = { version = "0.1", features = ["alloc"] }
 cipher = { version = "0.4", features = ["block-padding"] }
 pbkdf2 = "0.12"
 sha2 = "0.10"
+hex = "0.4"
 hmac = "0.12"
 md-5 = "0.10"
 thiserror = "1"

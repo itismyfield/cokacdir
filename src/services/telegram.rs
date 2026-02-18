@@ -7,8 +7,9 @@ use std::fs;
 use tokio::sync::Mutex;
 use teloxide::prelude::*;
 use teloxide::types::ParseMode;
+use sha2::{Sha256, Digest};
 
-use crate::services::claude::{self, StreamMessage};
+use crate::services::claude::{self, StreamMessage, DEFAULT_ALLOWED_TOOLS};
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType, SessionData};
 
 /// Per-chat session state
@@ -18,23 +19,171 @@ struct ChatSession {
     history: Vec<HistoryItem>,
 }
 
-type SharedState = Arc<Mutex<HashMap<ChatId, ChatSession>>>;
+/// Bot-level settings persisted to disk
+#[derive(Clone)]
+struct BotSettings {
+    allowed_tools: Vec<String>,
+    /// chat_id (string) → last working directory path
+    last_sessions: HashMap<String, String>,
+}
+
+impl Default for BotSettings {
+    fn default() -> Self {
+        Self {
+            allowed_tools: DEFAULT_ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect(),
+            last_sessions: HashMap::new(),
+        }
+    }
+}
+
+/// Shared state: per-chat sessions + bot settings
+struct SharedData {
+    sessions: HashMap<ChatId, ChatSession>,
+    settings: BotSettings,
+}
+
+type SharedState = Arc<Mutex<SharedData>>;
 
 /// Telegram message length limit
 const TELEGRAM_MSG_LIMIT: usize = 4096;
 
+/// Compute a short hash key from the bot token (first 16 chars of SHA-256 hex)
+fn token_hash(token: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(token.as_bytes());
+    let result = hasher.finalize();
+    hex::encode(&result[..8]) // 16 hex chars
+}
+
+/// Path to bot settings file: ~/.cokacdir/bot_settings.json
+fn bot_settings_path() -> Option<std::path::PathBuf> {
+    dirs::home_dir().map(|h| h.join(".cokacdir").join("bot_settings.json"))
+}
+
+/// Load bot settings from bot_settings.json
+fn load_bot_settings(token: &str) -> BotSettings {
+    let Some(path) = bot_settings_path() else {
+        return BotSettings::default();
+    };
+    let Ok(content) = fs::read_to_string(&path) else {
+        return BotSettings::default();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return BotSettings::default();
+    };
+    let key = token_hash(token);
+    let Some(entry) = json.get(&key) else {
+        return BotSettings::default();
+    };
+    let Some(tools_arr) = entry.get("allowed_tools").and_then(|v| v.as_array()) else {
+        return BotSettings::default();
+    };
+    let tools: Vec<String> = tools_arr
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    if tools.is_empty() {
+        return BotSettings::default();
+    }
+    let last_sessions = entry.get("last_sessions")
+        .and_then(|v| v.as_object())
+        .map(|obj| {
+            obj.iter()
+                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    BotSettings { allowed_tools: tools, last_sessions }
+}
+
+/// Save bot settings to bot_settings.json
+fn save_bot_settings(token: &str, settings: &BotSettings) {
+    let Some(path) = bot_settings_path() else { return };
+    // Ensure directory exists
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    // Load existing JSON or start fresh
+    let mut json: serde_json::Value = if let Ok(content) = fs::read_to_string(&path) {
+        serde_json::from_str(&content).unwrap_or_else(|_| serde_json::json!({}))
+    } else {
+        serde_json::json!({})
+    };
+    let key = token_hash(token);
+    json[key] = serde_json::json!({
+        "allowed_tools": settings.allowed_tools,
+        "last_sessions": settings.last_sessions,
+    });
+    if let Ok(s) = serde_json::to_string_pretty(&json) {
+        let _ = fs::write(&path, s);
+    }
+}
+
+/// Normalize tool name: first letter uppercase, rest lowercase
+fn normalize_tool_name(name: &str) -> String {
+    let lower = name.to_lowercase();
+    let mut chars = lower.chars();
+    match chars.next() {
+        Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
+/// All available tools with (description, is_destructive)
+const ALL_TOOLS: &[(&str, &str, bool)] = &[
+    ("Bash",            "Execute shell commands",                          true),
+    ("Read",            "Read file contents from the filesystem",          false),
+    ("Edit",            "Perform find-and-replace edits in files",         true),
+    ("Write",           "Create or overwrite files",                       true),
+    ("Glob",            "Find files by name pattern",                      false),
+    ("Grep",            "Search file contents with regex",                 false),
+    ("Task",            "Launch autonomous sub-agents for complex tasks",  true),
+    ("TaskOutput",      "Retrieve output from background tasks",           false),
+    ("TaskStop",        "Stop a running background task",                  false),
+    ("WebFetch",        "Fetch and process web page content",              true),
+    ("WebSearch",       "Search the web for up-to-date information",       true),
+    ("NotebookEdit",    "Edit Jupyter notebook cells",                     true),
+    ("Skill",           "Invoke slash-command skills",                     false),
+    ("TaskCreate",      "Create a structured task in the task list",       false),
+    ("TaskGet",         "Retrieve task details by ID",                     false),
+    ("TaskUpdate",      "Update task status or details",                   false),
+    ("TaskList",        "List all tasks and their status",                 false),
+    ("AskUserQuestion", "Ask the user a question (interactive)",           false),
+    ("EnterPlanMode",   "Enter planning mode (interactive)",               false),
+    ("ExitPlanMode",    "Exit planning mode (interactive)",                false),
+];
+
+/// Tool info: (description, is_destructive)
+fn tool_info(name: &str) -> (&'static str, bool) {
+    ALL_TOOLS.iter()
+        .find(|(n, _, _)| *n == name)
+        .map(|(_, desc, destr)| (*desc, *destr))
+        .unwrap_or(("Custom tool", false))
+}
+
+/// Format a risk badge for display
+fn risk_badge(destructive: bool) -> &'static str {
+    if destructive { "!!!" } else { "" }
+}
+
 /// Entry point: start the Telegram bot with long polling
 pub async fn run_bot(token: &str) {
     let bot = Bot::new(token);
-    let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
+    let bot_settings = load_bot_settings(token);
+    let state: SharedState = Arc::new(Mutex::new(SharedData {
+        sessions: HashMap::new(),
+        settings: bot_settings,
+    }));
 
     println!("  ✓ Bot connected — Listening for messages");
 
     let shared_state = state.clone();
+    let token_owned = token.to_string();
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
         let state = shared_state.clone();
+        let token = token_owned.clone();
         async move {
-            handle_message(bot, msg, state).await
+            handle_message(bot, msg, state, &token).await
         }
     })
     .await;
@@ -45,6 +194,7 @@ async fn handle_message(
     bot: Bot,
     msg: Message,
     state: SharedState,
+    token: &str,
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id;
     let user_name = msg.from.as_ref()
@@ -68,12 +218,36 @@ async fn handle_message(
     let text = text.to_string();
     let preview = truncate_str(&text, 60);
 
+    // Auto-restore session from bot_settings.json if not in memory
+    if !text.starts_with("/start") {
+        let mut data = state.lock().await;
+        if !data.sessions.contains_key(&chat_id) {
+            if let Some(last_path) = data.settings.last_sessions.get(&chat_id.0.to_string()).cloned() {
+                if Path::new(&last_path).is_dir() {
+                    let existing = load_existing_session(&last_path);
+                    let session = data.sessions.entry(chat_id).or_insert_with(|| ChatSession {
+                        session_id: None,
+                        current_path: None,
+                        history: Vec::new(),
+                    });
+                    session.current_path = Some(last_path.clone());
+                    if let Some((session_data, _)) = existing {
+                        session.session_id = Some(session_data.session_id.clone());
+                        session.history = session_data.history.clone();
+                    }
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] ↻ [{user_name}] Auto-restored session: {last_path}");
+                }
+            }
+        }
+    }
+
     if text.starts_with("/help") {
         println!("  [{timestamp}] ◀ [{user_name}] /help");
         handle_help_command(&bot, chat_id).await?;
     } else if text.starts_with("/start") {
         println!("  [{timestamp}] ◀ [{user_name}] /start");
-        handle_start_command(&bot, chat_id, &text, &state).await?;
+        handle_start_command(&bot, chat_id, &text, &state, token).await?;
     } else if text.starts_with("/clear") {
         println!("  [{timestamp}] ◀ [{user_name}] /clear");
         handle_clear_command(&bot, chat_id, &state).await?;
@@ -84,6 +258,15 @@ async fn handle_message(
     } else if text.starts_with("/down") {
         println!("  [{timestamp}] ◀ [{user_name}] /down {}", text.strip_prefix("/down").unwrap_or("").trim());
         handle_down_command(&bot, chat_id, &text, &state).await?;
+    } else if text.starts_with("/availabletools") {
+        println!("  [{timestamp}] ◀ [{user_name}] /availabletools");
+        handle_availabletools_command(&bot, chat_id).await?;
+    } else if text.starts_with("/allowedtools") {
+        println!("  [{timestamp}] ◀ [{user_name}] /allowedtools");
+        handle_allowedtools_command(&bot, chat_id, &state).await?;
+    } else if text.starts_with("/allowed") {
+        println!("  [{timestamp}] ◀ [{user_name}] /allowed {}", text.strip_prefix("/allowed").unwrap_or("").trim());
+        handle_allowed_command(&bot, chat_id, &text, &state, token).await?;
     } else if text.starts_with('!') {
         println!("  [{timestamp}] ◀ [{user_name}] Shell: {preview}");
         handle_shell_command(&bot, chat_id, &text, &state).await?;
@@ -103,66 +286,32 @@ async fn handle_help_command(
     chat_id: ChatId,
 ) -> ResponseResult<()> {
     let help = "\
-<b>📖 cokacdir Telegram Bot</b>
+<b>cokacdir Telegram Bot</b>
+Manage server files &amp; chat with Claude AI.
 
-Manage server files and chat with Claude AI from Telegram.
+<b>Session</b>
+<code>/start &lt;path&gt;</code> — Start session at directory
+<code>/start</code> — Start with auto-generated workspace
+<code>/pwd</code> — Show current working directory
+<code>/clear</code> — Clear AI conversation history
 
-━━━━━━━━━━━━━━━━━━━━
+<b>File Transfer</b>
+<code>/down &lt;file&gt;</code> — Download file from server
+Send a file/photo — Upload to session directory
 
-<b>🚀 Start Session</b>
+<b>Shell</b>
+<code>!&lt;command&gt;</code> — Run shell command directly
+  e.g. <code>!ls -la</code>, <code>!git status</code>
 
-<code>/start /path/to/dir</code>
-  Start a session at the specified directory.
-  Supports ~ paths (e.g. <code>/start ~/project</code>).
-  Automatically restores previous session if one exists.
+<b>AI Chat</b>
+Any other message is sent to Claude AI.
+AI can read, edit, and run commands in your session.
 
-<code>/start</code>
-  Start with an auto-generated workspace directory.
-  (<code>~/.cokacdir/workspace/&lt;random&gt;</code>)
-
-━━━━━━━━━━━━━━━━━━━━
-
-<b>📂 Session Management</b>
-
-<code>/pwd</code>
-  Show the current working directory.
-
-<code>/clear</code>
-  Clear conversation history for the current session.
-  The working directory is kept, but AI forgets prior context.
-
-━━━━━━━━━━━━━━━━━━━━
-
-<b>📁 File Transfer</b>
-
-<code>/down &lt;filepath&gt;</code>
-  Download a file from the server.
-  Relative paths resolve from the session directory.
-  e.g. <code>/down report.txt</code>, <code>/down /tmp/data.csv</code>
-
-<b>Upload</b>
-  Send a file or photo in chat to save it
-  to the current session directory.
-
-━━━━━━━━━━━━━━━━━━━━
-
-<b>💻 Shell Commands</b>
-
-<code>!&lt;command&gt;</code>
-  Execute a shell command on the server.
-  Runs in the current session directory.
-  e.g. <code>!ls -la</code>, <code>!cat main.rs</code>, <code>!mkdir src</code>
-
-━━━━━━━━━━━━━━━━━━━━
-
-<b>🤖 AI Chat</b>
-
-Any message that is not a command above
-is sent to Claude AI.
-AI can read, edit files and run commands
-in your session directory to assist you.
-
-━━━━━━━━━━━━━━━━━━━━
+<b>Tool Management</b>
+<code>/availabletools</code> — List all available tools
+<code>/allowedtools</code> — Show currently allowed tools
+<code>/allowed +name</code> — Add tool (e.g. <code>/allowed +Bash</code>)
+<code>/allowed -name</code> — Remove tool
 
 <code>/help</code> — Show this help";
 
@@ -179,6 +328,7 @@ async fn handle_start_command(
     chat_id: ChatId,
     text: &str,
     state: &SharedState,
+    token: &str,
 ) -> ResponseResult<()> {
     // Extract path from "/start <path>"
     let path_str = text.strip_prefix("/start").unwrap_or("").trim();
@@ -233,8 +383,8 @@ async fn handle_start_command(
     let mut response_lines = Vec::new();
 
     {
-        let mut sessions = state.lock().await;
-        let session = sessions.entry(chat_id).or_insert_with(|| ChatSession {
+        let mut data = state.lock().await;
+        let session = data.sessions.entry(chat_id).or_insert_with(|| ChatSession {
             session_id: None,
             current_path: None,
             history: Vec::new(),
@@ -278,6 +428,13 @@ async fn handle_start_command(
         }
     }
 
+    // Persist chat_id → path mapping for auto-restore after restart
+    {
+        let mut data = state.lock().await;
+        data.settings.last_sessions.insert(chat_id.0.to_string(), canonical_path);
+        save_bot_settings(token, &data.settings);
+    }
+
     let response_text = response_lines.join("\n");
     send_long_message(bot, chat_id, &response_text, None).await?;
 
@@ -291,8 +448,8 @@ async fn handle_clear_command(
     state: &SharedState,
 ) -> ResponseResult<()> {
     {
-        let mut sessions = state.lock().await;
-        if let Some(session) = sessions.get_mut(&chat_id) {
+        let mut data = state.lock().await;
+        if let Some(session) = data.sessions.get_mut(&chat_id) {
             session.session_id = None;
             session.history.clear();
         }
@@ -311,8 +468,8 @@ async fn handle_pwd_command(
     state: &SharedState,
 ) -> ResponseResult<()> {
     let current_path = {
-        let sessions = state.lock().await;
-        sessions.get(&chat_id).and_then(|s| s.current_path.clone())
+        let data = state.lock().await;
+        data.sessions.get(&chat_id).and_then(|s| s.current_path.clone())
     };
 
     match current_path {
@@ -343,8 +500,8 @@ async fn handle_down_command(
         file_path.to_string()
     } else {
         let current_path = {
-            let sessions = state.lock().await;
-            sessions.get(&chat_id).and_then(|s| s.current_path.clone())
+            let data = state.lock().await;
+            data.sessions.get(&chat_id).and_then(|s| s.current_path.clone())
         };
         match current_path {
             Some(base) => format!("{}/{}", base.trim_end_matches('/'), file_path),
@@ -381,8 +538,8 @@ async fn handle_file_upload(
 ) -> ResponseResult<()> {
     // Get current session path
     let current_path = {
-        let sessions = state.lock().await;
-        sessions.get(&chat_id).and_then(|s| s.current_path.clone())
+        let data = state.lock().await;
+        data.sessions.get(&chat_id).and_then(|s| s.current_path.clone())
     };
 
     let Some(save_dir) = current_path else {
@@ -456,8 +613,8 @@ async fn handle_shell_command(
 
     // Get current_path for working directory (default to home directory)
     let working_dir = {
-        let sessions = state.lock().await;
-        sessions.get(&chat_id)
+        let data = state.lock().await;
+        data.sessions.get(&chat_id)
             .and_then(|s| s.current_path.clone())
             .unwrap_or_else(|| {
                 dirs::home_dir()
@@ -516,6 +673,133 @@ async fn handle_shell_command(
     Ok(())
 }
 
+/// Handle /availabletools command - show all available tools
+async fn handle_availabletools_command(
+    bot: &Bot,
+    chat_id: ChatId,
+) -> ResponseResult<()> {
+    let mut msg = String::from("<b>Available Tools</b>\n\n");
+
+    for &(name, desc, destructive) in ALL_TOOLS {
+        let badge = risk_badge(destructive);
+        if badge.is_empty() {
+            msg.push_str(&format!("<code>{}</code> — {}\n", html_escape(name), html_escape(desc)));
+        } else {
+            msg.push_str(&format!("<code>{}</code> {} — {}\n", html_escape(name), badge, html_escape(desc)));
+        }
+    }
+    msg.push_str(&format!("\n{} = destructive\nTotal: {}", risk_badge(true), ALL_TOOLS.len()));
+
+    send_long_message(bot, chat_id, &msg, Some(ParseMode::Html)).await?;
+
+    Ok(())
+}
+
+/// Handle /allowedtools command - show current allowed tools list
+async fn handle_allowedtools_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    state: &SharedState,
+) -> ResponseResult<()> {
+    let tools = {
+        let data = state.lock().await;
+        data.settings.allowed_tools.clone()
+    };
+
+    let mut msg = String::from("<b>Allowed Tools</b>\n\n");
+    for tool in &tools {
+        let (desc, destructive) = tool_info(tool);
+        let badge = risk_badge(destructive);
+        if badge.is_empty() {
+            msg.push_str(&format!("<code>{}</code> — {}\n", html_escape(tool), html_escape(desc)));
+        } else {
+            msg.push_str(&format!("<code>{}</code> {} — {}\n", html_escape(tool), badge, html_escape(desc)));
+        }
+    }
+    msg.push_str(&format!("\n{} = destructive\nTotal: {}", risk_badge(true), tools.len()));
+
+    bot.send_message(chat_id, &msg)
+        .parse_mode(ParseMode::Html)
+        .await?;
+
+    Ok(())
+}
+
+/// Handle /allowed command - add/remove tools
+/// Usage: /allowed +toolname  (add)
+///        /allowed -toolname  (remove)
+async fn handle_allowed_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &SharedState,
+    token: &str,
+) -> ResponseResult<()> {
+    let arg = text.strip_prefix("/allowed").unwrap_or("").trim();
+
+    if arg.is_empty() {
+        bot.send_message(chat_id, "Usage:\n/allowed +toolname — Add a tool\n/allowed -toolname — Remove a tool\n/allowedtools — Show current list")
+            .await?;
+        return Ok(());
+    }
+
+    // Skip if argument starts with "tools" (that's /allowedtools handled separately)
+    if arg.starts_with("tools") {
+        // This shouldn't happen due to routing order, but just in case
+        return handle_allowedtools_command(bot, chat_id, state).await;
+    }
+
+    let (op, raw_name) = if let Some(name) = arg.strip_prefix('+') {
+        ('+', name.trim())
+    } else if let Some(name) = arg.strip_prefix('-') {
+        ('-', name.trim())
+    } else {
+        bot.send_message(chat_id, "Use +toolname to add or -toolname to remove.\nExample: /allowed +Bash")
+            .await?;
+        return Ok(());
+    };
+
+    if raw_name.is_empty() {
+        bot.send_message(chat_id, "Tool name cannot be empty.")
+            .await?;
+        return Ok(());
+    }
+
+    let tool_name = normalize_tool_name(raw_name);
+
+    let response_msg = {
+        let mut data = state.lock().await;
+        match op {
+            '+' => {
+                if data.settings.allowed_tools.iter().any(|t| t == &tool_name) {
+                    format!("<code>{}</code> is already in the list.", html_escape(&tool_name))
+                } else {
+                    data.settings.allowed_tools.push(tool_name.clone());
+                    save_bot_settings(token, &data.settings);
+                    format!("✅ Added <code>{}</code>", html_escape(&tool_name))
+                }
+            }
+            '-' => {
+                let before_len = data.settings.allowed_tools.len();
+                data.settings.allowed_tools.retain(|t| t != &tool_name);
+                if data.settings.allowed_tools.len() < before_len {
+                    save_bot_settings(token, &data.settings);
+                    format!("❌ Removed <code>{}</code>", html_escape(&tool_name))
+                } else {
+                    format!("<code>{}</code> is not in the list.", html_escape(&tool_name))
+                }
+            }
+            _ => unreachable!(),
+        }
+    };
+
+    bot.send_message(chat_id, &response_msg)
+        .parse_mode(ParseMode::Html)
+        .await?;
+
+    Ok(())
+}
+
 /// Handle regular text messages - send to Claude AI
 async fn handle_text_message(
     bot: &Bot,
@@ -523,14 +807,16 @@ async fn handle_text_message(
     user_text: &str,
     state: &SharedState,
 ) -> ResponseResult<()> {
-    // Get session info (drop lock before any await)
-    let session_info = {
-        let sessions = state.lock().await;
-        sessions.get(&chat_id).and_then(|session| {
+    // Get session info and allowed tools (drop lock before any await)
+    let (session_info, allowed_tools) = {
+        let data = state.lock().await;
+        let info = data.sessions.get(&chat_id).and_then(|session| {
             session.current_path.as_ref().map(|_| {
                 (session.session_id.clone(), session.current_path.clone().unwrap_or_default())
             })
-        })
+        });
+        let tools = data.settings.allowed_tools.clone();
+        (info, tools)
     };
 
     let (session_id, current_path) = match session_info {
@@ -544,8 +830,8 @@ async fn handle_text_message(
 
     // Add user message to history
     {
-        let mut sessions = state.lock().await;
-        if let Some(session) = sessions.get_mut(&chat_id) {
+        let mut data = state.lock().await;
+        if let Some(session) = data.sessions.get_mut(&chat_id) {
             session.history.push(HistoryItem {
                 item_type: HistoryType::User,
                 content: user_text.to_string(),
@@ -566,6 +852,7 @@ async fn handle_text_message(
     // Build system prompt with sendfile instructions
     let system_prompt_owned = format!(
         "You are chatting with a user through Telegram.\n\
+         Current working directory: {}\n\n\
          When your work produces a file the user would want (generated code, reports, images, archives, etc.),\n\
          send it by running this bash command:\n\n\
          cokacdir --sendfile <filepath> --chat {} --key {}\n\n\
@@ -574,9 +861,10 @@ async fn handle_text_message(
          Always keep the user informed about what you are doing. \
          Briefly explain each step as you work (e.g. \"Reading the file...\", \"Creating the script...\", \"Running tests...\"). \
          The user cannot see your tool calls, so narrate your progress so they know what is happening.\n\n\
-         NEVER use the AskUserQuestion tool. The user is on Telegram and cannot interact with it. \
-         If you need clarification, just ask in plain text.",
-        chat_id.0, bot.token()
+         IMPORTANT: The user is on Telegram and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
+         All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
+         Never use tools that expect user interaction. If you need clarification, just ask in plain text.",
+        current_path, chat_id.0, bot.token()
     );
 
     // Create channel for streaming
@@ -593,6 +881,7 @@ async fn handle_text_message(
             &current_path_clone,
             tx.clone(),
             Some(&system_prompt_owned),
+            Some(&allowed_tools),
         );
 
         if let Err(e) = result {
@@ -633,9 +922,19 @@ async fn handle_text_message(
                             if is_error {
                                 let ts = chrono::Local::now().format("%H:%M:%S");
                                 println!("  [{ts}]   ✗ Error: {}", truncate_str(&content, 80));
-                                full_response.push_str(&format!("\n❌ `{}`\n\n", truncate_str(&content, 500)));
+                                let truncated = truncate_str(&content, 500);
+                                if truncated.contains('\n') {
+                                    full_response.push_str(&format!("\n❌\n```\n{}\n```\n", truncated));
+                                } else {
+                                    full_response.push_str(&format!("\n❌ `{}`\n\n", truncated));
+                                }
                             } else if !content.is_empty() {
-                                full_response.push_str(&format!("\n✅ `{}`\n\n", truncate_str(&content, 300)));
+                                let truncated = truncate_str(&content, 300);
+                                if truncated.contains('\n') {
+                                    full_response.push_str(&format!("\n```\n{}\n```\n", truncated));
+                                } else {
+                                    full_response.push_str(&format!("\n✅ `{}`\n\n", truncated));
+                                }
                             }
                         }
                         StreamMessage::TaskNotification { summary, .. } => {
@@ -677,7 +976,10 @@ async fn handle_text_message(
         };
 
         if current_text != last_edit_text {
-            let _ = bot.edit_message_text(chat_id, placeholder_msg_id, &current_text).await;
+            let html_text = markdown_to_telegram_html(&current_text);
+            let _ = bot.edit_message_text(chat_id, placeholder_msg_id, &html_text)
+                .parse_mode(ParseMode::Html)
+                .await;
             last_edit_text = current_text;
         }
     }
@@ -704,8 +1006,8 @@ async fn handle_text_message(
 
     // Update session state
     {
-        let mut sessions = state.lock().await;
-        if let Some(session) = sessions.get_mut(&chat_id) {
+        let mut data = state.lock().await;
+        if let Some(session) = data.sessions.get_mut(&chat_id) {
             if let Some(sid) = new_session_id {
                 session.session_id = Some(sid);
             }

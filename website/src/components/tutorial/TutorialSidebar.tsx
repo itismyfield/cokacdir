@@ -54,6 +54,7 @@ const tocItems: TocItem[] = [
   { id: 'telegram-create-bot', en: 'Create Bot', ko: 'Bot 만들기', indent: true },
   { id: 'telegram-setup', en: 'Setup & Start', ko: '설정 및 시작', indent: true },
   { id: 'telegram-commands', en: 'Commands', ko: '사용 가능한 명령어', indent: true },
+  { id: 'telegram-tools', en: 'Tool Management', ko: 'AI 도구 관리', indent: true },
   { id: 'telegram-workflow', en: 'Workflow Examples', ko: '실전 워크플로우', indent: true },
   { id: 'bookmarks-help', en: 'Bookmarks & Help', ko: '북마크 & 도움말' },
   { id: 'goto-dialog', en: 'Go to Path', ko: '경로 이동 (Go to Path)', indent: true },

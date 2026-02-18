@@ -902,6 +902,7 @@ Keep responses concise and terminal-friendly.",
                 &current_path,
                 tx.clone(),
                 None,
+                None,
             );
 
             let elapsed = start_time.elapsed();

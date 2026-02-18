@@ -415,6 +415,73 @@ export default function TelegramBot() {
             </div>
           </div>
 
+          {/* ========== AI 도구 관리 ========== */}
+          <SectionHeading id="telegram-tools" level={3}>AI 도구 관리</SectionHeading>
+          <p className="text-zinc-400 mb-4 leading-relaxed">
+            Claude AI가 사용할 수 있는 도구(Tool)를 확인하고 동적으로 추가/제거할 수 있습니다.
+            기본적으로 17개의 도구가 활성화되어 있으며, 필요에 따라 조정할 수 있습니다.
+          </p>
+
+          <div className="space-y-3 mb-6">
+            {/* /availabletools */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/availabletools</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                사용 가능한 모든 도구 목록을 설명과 함께 표시합니다.
+                각 도구가 어떤 기능을 하는지 확인할 때 유용합니다.
+              </p>
+            </div>
+
+            {/* /allowedtools */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/allowedtools</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                현재 AI에게 허용된 도구 목록을 표시합니다. 번호가 매겨진 목록으로 보여줍니다.
+              </p>
+            </div>
+
+            {/* /allowed +toolname */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/allowed +toolname</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                도구를 허용 목록에 추가합니다.
+                도구 이름은 자동으로 정규화됩니다 (예: <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">bash</code> → <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">Bash</code>).
+              </p>
+              <code className="block text-zinc-500 font-mono text-sm bg-bg-elevated px-3 py-2 rounded mt-2">
+                /allowed +Bash
+              </code>
+            </div>
+
+            {/* /allowed -toolname */}
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/allowed -toolname</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                도구를 허용 목록에서 제거합니다. 제거된 도구는 AI가 더 이상 사용할 수 없습니다.
+              </p>
+              <code className="block text-zinc-500 font-mono text-sm bg-bg-elevated px-3 py-2 rounded mt-2">
+                /allowed -Bash
+              </code>
+            </div>
+          </div>
+
+          <TipBox>
+            도구 설정은 <code className="text-accent-cyan font-mono bg-bg-card px-1 py-0.5 rounded">~/.cokacdir/bot_settings.json</code>에 자동 저장되므로
+            봇을 재시작해도 유지됩니다.
+          </TipBox>
+
+          <TipBox variant="warning">
+            <code className="text-accent-cyan font-mono">Bash</code> 도구를 제거하면 AI가 쉘 명령어를 실행할 수 없게 됩니다.
+            보안이 중요한 환경에서는 필요한 도구만 남기고 나머지를 제거하는 것을 고려하세요.
+          </TipBox>
+
           {/* ========== 실전 사용 워크플로우 ========== */}
           <SectionHeading id="telegram-workflow" level={3}>실전 사용 워크플로우</SectionHeading>
           <p className="text-zinc-400 mb-4 leading-relaxed">
@@ -993,6 +1060,68 @@ export default function TelegramBot() {
               </p>
             </div>
           </div>
+
+          {/* ========== Tool Management ========== */}
+          <SectionHeading id="telegram-tools" level={3}>AI Tool Management</SectionHeading>
+          <p className="text-zinc-400 mb-4 leading-relaxed">
+            You can view and dynamically add or remove the tools available to Claude AI.
+            By default, 17 tools are enabled. Adjust them as needed for your workflow or security requirements.
+          </p>
+
+          <div className="space-y-3 mb-6">
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/availabletools</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Show all available tools with descriptions. Useful for discovering what each tool does.
+              </p>
+            </div>
+
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/allowedtools</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Show the currently allowed tools as a numbered list.
+              </p>
+            </div>
+
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/allowed +toolname</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Add a tool to the allowed list.
+                Tool names are automatically normalized (e.g., <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">bash</code> → <code className="text-zinc-300 font-mono bg-bg-elevated px-1 py-0.5 rounded">Bash</code>).
+              </p>
+              <code className="block text-zinc-500 font-mono text-sm bg-bg-elevated px-3 py-2 rounded mt-2">
+                /allowed +Bash
+              </code>
+            </div>
+
+            <div className="bg-bg-card border border-zinc-800 rounded-lg p-4">
+              <div className="flex items-center gap-2 mb-2">
+                <code className="text-accent-cyan font-mono font-semibold">/allowed -toolname</code>
+              </div>
+              <p className="text-zinc-400 text-sm leading-relaxed">
+                Remove a tool from the allowed list. The AI will no longer be able to use the removed tool.
+              </p>
+              <code className="block text-zinc-500 font-mono text-sm bg-bg-elevated px-3 py-2 rounded mt-2">
+                /allowed -Bash
+              </code>
+            </div>
+          </div>
+
+          <TipBox>
+            Tool settings are automatically saved to <code className="text-accent-cyan font-mono bg-bg-card px-1 py-0.5 rounded">~/.cokacdir/bot_settings.json</code> and
+            persist across bot restarts.
+          </TipBox>
+
+          <TipBox variant="warning">
+            Removing the <code className="text-accent-cyan font-mono">Bash</code> tool prevents AI from executing shell commands.
+            For security-sensitive environments, consider keeping only the tools you need.
+          </TipBox>
 
           {/* ========== Workflow Examples ========== */}
           <SectionHeading id="telegram-workflow" level={3}>Workflow Examples</SectionHeading>

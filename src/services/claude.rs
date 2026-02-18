@@ -106,15 +106,28 @@ fn is_valid_session_id(session_id: &str) -> bool {
     !session_id.is_empty() && session_id.len() <= 64 && session_id_regex().is_match(session_id)
 }
 
+/// Default allowed tools for Claude CLI
+pub const DEFAULT_ALLOWED_TOOLS: &[&str] = &[
+    "Bash", "Read", "Edit", "Write", "Glob", "Grep", "Task", "TaskOutput",
+    "TaskStop", "WebFetch", "WebSearch", "NotebookEdit", "Skill",
+    "TaskCreate", "TaskGet", "TaskUpdate", "TaskList",
+];
+
 /// Execute a command using Claude CLI
 pub fn execute_command(
     prompt: &str,
     session_id: Option<&str>,
     working_dir: &str,
+    allowed_tools: Option<&[String]>,
 ) -> ClaudeResponse {
+    let tools_str = match allowed_tools {
+        Some(tools) => tools.join(","),
+        None => DEFAULT_ALLOWED_TOOLS.join(","),
+    };
     let mut args = vec![
         "-p".to_string(),
-        "--dangerously-skip-permissions".to_string(),
+        "--allowedTools".to_string(),
+        tools_str,
         "--output-format".to_string(),
         "json".to_string(),
         "--append-system-prompt".to_string(),
@@ -296,6 +309,7 @@ pub fn execute_command_streaming(
     working_dir: &str,
     sender: Sender<StreamMessage>,
     system_prompt: Option<&str>,
+    allowed_tools: Option<&[String]>,
 ) -> Result<(), String> {
     debug_log("========================================");
     debug_log("=== execute_command_streaming START ===");
@@ -335,9 +349,14 @@ IMPORTANT: Format your responses using Markdown for better readability:
 - Use headers (## Title) to organize longer responses
 - Keep formatting minimal and terminal-friendly"#;
 
+    let tools_str = match allowed_tools {
+        Some(tools) => tools.join(","),
+        None => DEFAULT_ALLOWED_TOOLS.join(","),
+    };
     let mut args = vec![
         "-p".to_string(),
-        "--dangerously-skip-permissions".to_string(),
+        "--allowedTools".to_string(),
+        tools_str,
         "--verbose".to_string(),
         "--output-format".to_string(),
         "stream-json".to_string(),

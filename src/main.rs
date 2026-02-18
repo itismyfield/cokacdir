@@ -139,7 +139,7 @@ fn handle_prompt(prompt: &str) {
     let current_dir = std::env::current_dir()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| ".".to_string());
-    let response = claude::execute_command(prompt, None, &current_dir);
+    let response = claude::execute_command(prompt, None, &current_dir, None);
 
     if !response.success {
         eprintln!("Error: {}", response.error.unwrap_or_else(|| "Unknown error".to_string()));
