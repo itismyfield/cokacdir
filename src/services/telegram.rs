@@ -28,7 +28,7 @@ pub async fn run_bot(token: &str) {
     let bot = Bot::new(token);
     let state: SharedState = Arc::new(Mutex::new(HashMap::new()));
 
-    println!("Telegram bot server started. Waiting for messages...");
+    println!("  ✓ Bot connected — Listening for messages");
 
     let shared_state = state.clone();
     teloxide::repl(bot, move |bot: Bot, msg: Message| {
@@ -47,10 +47,18 @@ async fn handle_message(
     state: SharedState,
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id;
+    let user_name = msg.from.as_ref()
+        .map(|u| u.first_name.as_str())
+        .unwrap_or("unknown");
+    let timestamp = chrono::Local::now().format("%H:%M:%S");
 
     // Handle file/photo uploads
     if msg.document().is_some() || msg.photo().is_some() {
-        return handle_file_upload(&bot, chat_id, &msg, &state).await;
+        let file_hint = if msg.document().is_some() { "document" } else { "photo" };
+        println!("  [{timestamp}] ◀ [{user_name}] Upload: {file_hint}");
+        let result = handle_file_upload(&bot, chat_id, &msg, &state).await;
+        println!("  [{timestamp}] ▶ [{user_name}] Upload complete");
+        return result;
     }
 
     let Some(text) = msg.text() else {
@@ -58,19 +66,29 @@ async fn handle_message(
     };
 
     let text = text.to_string();
+    let preview = truncate_str(&text, 60);
 
     if text.starts_with("/start") {
+        println!("  [{timestamp}] ◀ [{user_name}] /start");
         handle_start_command(&bot, chat_id, &text, &state).await?;
     } else if text.starts_with("/clear") {
+        println!("  [{timestamp}] ◀ [{user_name}] /clear");
         handle_clear_command(&bot, chat_id, &state).await?;
+        println!("  [{timestamp}] ▶ [{user_name}] Session cleared");
     } else if text.starts_with("/pwd") {
+        println!("  [{timestamp}] ◀ [{user_name}] /pwd");
         handle_pwd_command(&bot, chat_id, &state).await?;
     } else if text.starts_with("/down") {
+        println!("  [{timestamp}] ◀ [{user_name}] /down {}", text.strip_prefix("/down").unwrap_or("").trim());
         handle_down_command(&bot, chat_id, &text, &state).await?;
     } else if text.starts_with('!') {
+        println!("  [{timestamp}] ◀ [{user_name}] Shell: {preview}");
         handle_shell_command(&bot, chat_id, &text, &state).await?;
+        println!("  [{timestamp}] ▶ [{user_name}] Shell done");
     } else {
+        println!("  [{timestamp}] ◀ [{user_name}] {preview}");
         handle_text_message(&bot, chat_id, &text, &state).await?;
+        println!("  [{timestamp}] ▶ [{user_name}] Response sent");
     }
 
     Ok(())
@@ -122,6 +140,8 @@ async fn handle_start_command(
             session.current_path = Some(canonical_path.clone());
             session.history = session_data.history.clone();
 
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ▶ Session restored: {canonical_path}");
             response_lines.push(format!("Session restored at `{}`.", canonical_path));
             response_lines.push(String::new());
 
@@ -147,6 +167,8 @@ async fn handle_start_command(
             session.current_path = Some(canonical_path.clone());
             session.history.clear();
 
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ▶ Session started: {canonical_path}");
             response_lines.push(format!("Session started at `{}`.", canonical_path));
         }
     }
@@ -476,6 +498,9 @@ async fn handle_text_message(
     let mut new_session_id: Option<String> = None;
 
     while !done {
+        // Send typing action (lasts ~5 seconds, so send periodically)
+        let _ = bot.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
+
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
 
         // Drain all available messages
@@ -491,13 +516,17 @@ async fn handle_text_message(
                         }
                         StreamMessage::ToolUse { name, input } => {
                             let summary = format_tool_input(&name, &input);
-                            full_response.push_str(&format!("\n\n🔧 {}\n", summary));
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            println!("  [{ts}]   ⚙ {name}: {}", truncate_str(&summary, 80));
+                            full_response.push_str(&format!("\n\n⚙️ {}\n", summary));
                         }
                         StreamMessage::ToolResult { content, is_error } => {
                             if is_error {
-                                full_response.push_str(&format!("\n❌ {}\n\n", truncate_str(&content, 500)));
+                                let ts = chrono::Local::now().format("%H:%M:%S");
+                                println!("  [{ts}]   ✗ Error: {}", truncate_str(&content, 80));
+                                full_response.push_str(&format!("\n❌ `{}`\n\n", truncate_str(&content, 500)));
                             } else if !content.is_empty() {
-                                full_response.push_str(&format!("\n✅ {}\n\n", truncate_str(&content, 300)));
+                                full_response.push_str(&format!("\n✅ `{}`\n\n", truncate_str(&content, 300)));
                             }
                         }
                         StreamMessage::TaskNotification { summary, .. } => {
@@ -532,8 +561,10 @@ async fn handle_text_message(
         let current_text = if full_response.is_empty() {
             "...".to_string()
         } else {
+            // Normalize empty lines to max 1 consecutive empty line
+            let normalized = normalize_empty_lines(&full_response);
             // Truncate to Telegram limit for the current message
-            truncate_str(&full_response, TELEGRAM_MSG_LIMIT)
+            truncate_str(&normalized, TELEGRAM_MSG_LIMIT)
         };
 
         if current_text != last_edit_text {
@@ -547,7 +578,8 @@ async fn handle_text_message(
         full_response = "(No response)".to_string();
     }
 
-    // Convert markdown to Telegram HTML for formatted display
+    // Normalize empty lines and convert markdown to Telegram HTML for formatted display
+    let full_response = normalize_empty_lines(&full_response);
     let html_response = markdown_to_telegram_html(&full_response);
 
     // Send final message(s) with HTML formatting
@@ -765,6 +797,30 @@ async fn send_long_message(
     Ok(())
 }
 
+/// Normalize consecutive empty lines to maximum of one
+fn normalize_empty_lines(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut prev_was_empty = false;
+
+    for line in s.lines() {
+        let is_empty = line.is_empty();
+        if is_empty {
+            if !prev_was_empty {
+                result.push('\n');
+            }
+            prev_was_empty = true;
+        } else {
+            if !result.is_empty() {
+                result.push('\n');
+            }
+            result.push_str(line);
+            prev_was_empty = false;
+        }
+    }
+
+    result
+}
+
 /// Escape special HTML characters for Telegram HTML parse mode
 fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")
@@ -964,9 +1020,9 @@ fn format_tool_input(name: &str, input: &str) -> String {
             let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
             let cmd = v.get("command").and_then(|v| v.as_str()).unwrap_or("");
             if !desc.is_empty() {
-                format!("{}: {}", desc, truncate_str(cmd, 150))
+                format!("{}: `{}`", desc, truncate_str(cmd, 150))
             } else {
-                truncate_str(cmd, 200)
+                format!("`{}`", truncate_str(cmd, 200))
             }
         }
         "Read" => {
@@ -975,11 +1031,22 @@ fn format_tool_input(name: &str, input: &str) -> String {
         }
         "Write" => {
             let fp = v.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            format!("Write {}", fp)
+            let content = v.get("content").and_then(|v| v.as_str()).unwrap_or("");
+            let lines = content.lines().count();
+            if lines > 0 {
+                format!("Write {} ({} lines)", fp, lines)
+            } else {
+                format!("Write {}", fp)
+            }
         }
         "Edit" => {
             let fp = v.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            format!("Edit {}", fp)
+            let replace_all = v.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+            if replace_all {
+                format!("Edit {} (replace all)", fp)
+            } else {
+                format!("Edit {}", fp)
+            }
         }
         "Glob" => {
             let pattern = v.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
@@ -993,10 +1060,24 @@ fn format_tool_input(name: &str, input: &str) -> String {
         "Grep" => {
             let pattern = v.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let path = v.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let output_mode = v.get("output_mode").and_then(|v| v.as_str()).unwrap_or("");
             if !path.is_empty() {
-                format!("Grep \"{}\" in {}", pattern, path)
+                if !output_mode.is_empty() {
+                    format!("Grep \"{}\" in {} ({})", pattern, path, output_mode)
+                } else {
+                    format!("Grep \"{}\" in {}", pattern, path)
+                }
             } else {
                 format!("Grep \"{}\"", pattern)
+            }
+        }
+        "NotebookEdit" => {
+            let nb_path = v.get("notebook_path").and_then(|v| v.as_str()).unwrap_or("");
+            let cell_id = v.get("cell_id").and_then(|v| v.as_str()).unwrap_or("");
+            if !cell_id.is_empty() {
+                format!("Notebook {} ({})", nb_path, cell_id)
+            } else {
+                format!("Notebook {}", nb_path)
             }
         }
         "WebSearch" => {
@@ -1009,7 +1090,78 @@ fn format_tool_input(name: &str, input: &str) -> String {
         }
         "Task" => {
             let desc = v.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            format!("Task: {}", desc)
+            let subagent_type = v.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("");
+            if !subagent_type.is_empty() {
+                format!("Task [{}]: {}", subagent_type, desc)
+            } else {
+                format!("Task: {}", desc)
+            }
+        }
+        "TaskOutput" => {
+            let task_id = v.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+            format!("Get task output: {}", task_id)
+        }
+        "TaskStop" => {
+            let task_id = v.get("task_id").and_then(|v| v.as_str()).unwrap_or("");
+            format!("Stop task: {}", task_id)
+        }
+        "TodoWrite" => {
+            if let Some(todos) = v.get("todos").and_then(|v| v.as_array()) {
+                let pending = todos.iter().filter(|t| {
+                    t.get("status").and_then(|s| s.as_str()) == Some("pending")
+                }).count();
+                let in_progress = todos.iter().filter(|t| {
+                    t.get("status").and_then(|s| s.as_str()) == Some("in_progress")
+                }).count();
+                let completed = todos.iter().filter(|t| {
+                    t.get("status").and_then(|s| s.as_str()) == Some("completed")
+                }).count();
+                format!("Todo: {} pending, {} in progress, {} completed", pending, in_progress, completed)
+            } else {
+                "Update todos".to_string()
+            }
+        }
+        "Skill" => {
+            let skill = v.get("skill").and_then(|v| v.as_str()).unwrap_or("");
+            format!("Skill: {}", skill)
+        }
+        "AskUserQuestion" => {
+            if let Some(questions) = v.get("questions").and_then(|v| v.as_array()) {
+                if let Some(q) = questions.first() {
+                    let question = q.get("question").and_then(|v| v.as_str()).unwrap_or("");
+                    truncate_str(question, 200)
+                } else {
+                    "Ask user question".to_string()
+                }
+            } else {
+                "Ask user question".to_string()
+            }
+        }
+        "ExitPlanMode" => {
+            "Exit plan mode".to_string()
+        }
+        "EnterPlanMode" => {
+            "Enter plan mode".to_string()
+        }
+        "TaskCreate" => {
+            let subject = v.get("subject").and_then(|v| v.as_str()).unwrap_or("");
+            format!("Create task: {}", subject)
+        }
+        "TaskUpdate" => {
+            let task_id = v.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
+            let status = v.get("status").and_then(|v| v.as_str()).unwrap_or("");
+            if !status.is_empty() {
+                format!("Update task {}: {}", task_id, status)
+            } else {
+                format!("Update task {}", task_id)
+            }
+        }
+        "TaskGet" => {
+            let task_id = v.get("taskId").and_then(|v| v.as_str()).unwrap_or("");
+            format!("Get task: {}", task_id)
+        }
+        "TaskList" => {
+            "List tasks".to_string()
         }
         _ => {
             format!("{} {}", name, truncate_str(input, 200))

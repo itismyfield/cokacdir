@@ -93,16 +93,28 @@ fn print_version() {
 fn handle_ccserver(tokens: Vec<String>) {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
+    let title = format!("  cokacdir v{}  |  Telegram Bot Server  ", VERSION);
+    let width = title.chars().count();
+    println!();
+    println!("  ┌{}┐", "─".repeat(width));
+    println!("  │{}│", title);
+    println!("  └{}┘", "─".repeat(width));
+    println!();
+
     if tokens.len() == 1 {
-        println!("Starting Telegram bot server...");
+        println!("  ▸ Bot instance : 1");
+        println!("  ▸ Status       : Connecting...");
+        println!();
         rt.block_on(services::telegram::run_bot(&tokens[0]));
     } else {
-        println!("Starting {} Telegram bot servers...", tokens.len());
+        println!("  ▸ Bot instances : {}", tokens.len());
+        println!("  ▸ Status        : Connecting...");
+        println!();
         rt.block_on(async {
             let mut handles = Vec::new();
             for (i, token) in tokens.into_iter().enumerate() {
                 handles.push(tokio::spawn(async move {
-                    println!("Bot #{} started.", i + 1);
+                    println!("  ✓ Bot #{} connected", i + 1);
                     services::telegram::run_bot(&token).await;
                 }));
             }
