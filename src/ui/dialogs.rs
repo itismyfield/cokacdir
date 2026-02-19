@@ -251,7 +251,6 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
     const SIMPLE_DIALOG_WIDTH: u16 = 50;      // 간단한 다이얼로그 너비
 
     const GOTO_BASE_HEIGHT: u16 = 6;          // Goto 다이얼로그 기본 높이
-    const COPY_MOVE_BASE_HEIGHT: u16 = 7;     // Copy/Move 다이얼로그 기본 높이
     const SIMPLE_INPUT_HEIGHT: u16 = 5;       // 간단한 입력 다이얼로그 높이
     const CONFIRM_DIALOG_HEIGHT: u16 = 6;     // 확인 다이얼로그 높이
     const PROGRESS_DIALOG_HEIGHT: u16 = 8;    // 프로그레스 다이얼로그 높이
@@ -281,12 +280,6 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
         DialogType::ExtensionHandlerError => {
             // Error dialog: wider to accommodate error messages, taller for multi-line
             (65, 8, 8)
-        }
-        DialogType::Copy | DialogType::Move => {
-            let w = area.width.saturating_sub(DIALOG_MARGIN).max(DIALOG_MIN_WIDTH);
-            let max_h = COPY_MOVE_BASE_HEIGHT + MAX_COMPLETION_HEIGHT;
-            let h = COPY_MOVE_BASE_HEIGHT + completion_height;
-            (w, h, max_h)
         }
         DialogType::Goto => {
             let w = area.width.saturating_sub(DIALOG_MARGIN).max(DIALOG_MIN_WIDTH);
@@ -318,7 +311,7 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
         DialogType::DuplicateConflict => {
             (SIMPLE_DIALOG_WIDTH, CONFLICT_DIALOG_HEIGHT, CONFLICT_DIALOG_HEIGHT)
         }
-        DialogType::TarExcludeConfirm | DialogType::CopyExcludeConfirm => {
+        DialogType::TarExcludeConfirm => {
             (60, 15, 15) // Exclude confirm dialog
         }
         DialogType::Settings => {
@@ -407,9 +400,6 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
         DialogType::TrueColorWarning => {
             draw_confirm_dialog(frame, dialog, dialog_area, theme, " True Color ");
         }
-        DialogType::Copy | DialogType::Move => {
-            draw_copy_move_dialog(frame, dialog, dialog_area, theme);
-        }
         DialogType::Goto => {
             draw_goto_dialog(frame, app, dialog, dialog_area, theme);
         }
@@ -427,11 +417,6 @@ pub fn draw_dialog(frame: &mut Frame, app: &App, dialog: &Dialog, area: Rect, th
         DialogType::TarExcludeConfirm => {
             if let Some(ref state) = app.tar_exclude_state {
                 draw_tar_exclude_confirm_dialog(frame, dialog, state, dialog_area, theme);
-            }
-        }
-        DialogType::CopyExcludeConfirm => {
-            if let Some(ref state) = app.copy_exclude_state {
-                draw_copy_exclude_confirm_dialog(frame, dialog, state, dialog_area, theme);
             }
         }
         DialogType::Settings => {
@@ -1128,179 +1113,6 @@ fn draw_error_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &The
         Paragraph::new(buttons).alignment(ratatui::layout::Alignment::Center),
         button_area,
     );
-}
-
-/// Copy/Move 다이얼로그 (경로 자동완성 포함)
-fn draw_copy_move_dialog(frame: &mut Frame, dialog: &Dialog, area: Rect, theme: &Theme) {
-    let title = match dialog.dialog_type {
-        DialogType::Copy => " Copy ",
-        DialogType::Move => " Move ",
-        _ => " Transfer ",
-    };
-
-    let block = Block::default()
-        .title(title)
-        .title_style(Style::default().fg(theme.dialog.title).add_modifier(Modifier::BOLD))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.dialog.border))
-        .style(Style::default().bg(theme.dialog.bg));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // 레이아웃 Y 좌표 계산 (상대적 위치)
-    let message_y = inner.y;
-    let input_y = message_y + 2;  // 메시지 아래 1줄 여백 후
-    let list_y = input_y + 1;     // 입력창 바로 아래
-    let help_y = inner.y + inner.height - 1;  // 하단
-    let list_height = help_y.saturating_sub(list_y).saturating_sub(1);  // 목록과 도움말 사이 여백
-
-    // 파일 목록 메시지
-    let message_area = Rect::new(inner.x + 1, message_y, inner.width - 2, 1);
-    frame.render_widget(
-        Paragraph::new(dialog.message.clone()).style(Style::default().fg(theme.dialog.text)),
-        message_area,
-    );
-
-    // 경로 입력 필드 (goto 스타일)
-    let (base_dir, _) = parse_path_for_completion(&dialog.input);
-    let is_root_path = base_dir == Path::new("/");
-
-    let input_chars: Vec<char> = dialog.input.chars().collect();
-    let prefix_char_start = if dialog.input.ends_with('/') {
-        input_chars.len()
-    } else {
-        input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
-    };
-
-    let current_prefix: String = input_chars[prefix_char_start..].iter().collect();
-
-    let preview_suffix = if let Some(ref completion) = dialog.completion {
-        if completion.visible && !completion.suggestions.is_empty() {
-            if let Some(selected) = completion.suggestions.get(completion.selected_index) {
-                let selected_name = selected.trim_end_matches('/');
-                if selected_name.to_lowercase().starts_with(&current_prefix.to_lowercase()) {
-                    let prefix_char_count = current_prefix.chars().count();
-                    let suffix: String = selected_name.chars().skip(prefix_char_count).collect();
-                    if selected.ends_with('/') {
-                        format!("{}/", suffix)
-                    } else {
-                        suffix.to_string()
-                    }
-                } else {
-                    String::new()
-                }
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        }
-    } else {
-        String::new()
-    };
-
-    let max_input_width = (inner.width - 4) as usize;
-    let preview_chars: Vec<char> = preview_suffix.chars().collect();
-    let total_len = input_chars.len() + preview_chars.len();
-    let cursor_pos = dialog.cursor_pos.min(input_chars.len());
-
-    let (display_chars, display_preview, display_prefix_start, display_cursor_pos) = if total_len > max_input_width {
-        let available = max_input_width.saturating_sub(3);
-        if preview_chars.len() >= available {
-            let preview_display: String = preview_chars[..available].iter().collect();
-            (vec!['.', '.', '.'], preview_display, 3usize, 3usize)
-        } else {
-            let input_available = available - preview_chars.len();
-            let skip = input_chars.len().saturating_sub(input_available);
-            let input_display: Vec<char> = input_chars[skip..].to_vec();
-            let prefix_pos = if prefix_char_start >= skip {
-                3 + (prefix_char_start - skip)
-            } else {
-                3
-            };
-            let adj_cursor = if cursor_pos >= skip { 3 + cursor_pos - skip } else { 3 };
-            let mut display = vec!['.', '.', '.'];
-            display.extend(input_display);
-            (display, preview_suffix.clone(), prefix_pos, adj_cursor)
-        }
-    } else {
-        (input_chars.clone(), preview_suffix.clone(), prefix_char_start, cursor_pos)
-    };
-
-    // 커서 위치에 따라 텍스트 분할
-    let before_cursor: String = display_chars[..display_cursor_pos].iter().collect();
-    let cursor_char = if display_cursor_pos < display_chars.len() {
-        display_chars[display_cursor_pos].to_string()
-    } else {
-        if !display_preview.is_empty() {
-            display_preview.chars().next().unwrap().to_string()
-        } else {
-            " ".to_string()
-        }
-    };
-    let after_cursor: String = if display_cursor_pos < display_chars.len() {
-        display_chars[display_cursor_pos + 1..].iter().collect()
-    } else {
-        String::new()
-    };
-    let display_preview_after = if display_cursor_pos >= display_chars.len() && !display_preview.is_empty() {
-        display_preview.chars().skip(1).collect()
-    } else {
-        display_preview.clone()
-    };
-
-    let cursor_style = Style::default()
-        .fg(theme.dialog.input_cursor_fg)
-        .bg(theme.dialog.input_cursor_bg)
-        .add_modifier(Modifier::SLOW_BLINK);
-
-    let input_line = Line::from(vec![
-        Span::styled("> ", Style::default().fg(theme.dialog.input_prompt)),
-        Span::styled(before_cursor, Style::default().fg(theme.dialog.input_text)),
-        Span::styled(cursor_char, cursor_style),
-        Span::styled(after_cursor, Style::default().fg(theme.dialog.input_text)),
-        Span::styled(&display_preview_after, Style::default().fg(theme.dialog.preview_suffix_text)),
-    ]);
-    let input_area = Rect::new(inner.x + 1, input_y, inner.width - 2, 1);
-    frame.render_widget(Paragraph::new(input_line), input_area);
-
-    // 자동완성 목록
-    // 루트 경로일 때는 "/" 위치에 맞추기 위해 1 감소 (단, prefix가 있을 때만)
-    let list_x = if is_root_path && display_prefix_start > 0 {
-        inner.x + 1 + 2 + display_prefix_start as u16 - 1
-    } else {
-        inner.x + 1 + 2 + display_prefix_start as u16
-    };
-    let list_width = if is_root_path && display_prefix_start > 0 {
-        inner.width.saturating_sub(2 + display_prefix_start as u16)
-    } else {
-        inner.width.saturating_sub(3 + display_prefix_start as u16)
-    };
-
-    if let Some(ref completion) = dialog.completion {
-        if completion.visible && !completion.suggestions.is_empty() {
-            draw_completion_list(
-                frame,
-                completion,
-                Rect::new(list_x, list_y, list_width, list_height),
-                theme,
-                is_root_path,
-            );
-        }
-    }
-
-    // 하단 도움말
-    let help_line = Line::from(vec![
-        Span::styled("Tab", Style::default().fg(theme.dialog.help_key_text).add_modifier(Modifier::BOLD)),
-        Span::styled(":complete ", Style::default().fg(theme.dialog.help_label_text)),
-        Span::styled("Enter", Style::default().fg(theme.dialog.help_key_text).add_modifier(Modifier::BOLD)),
-        Span::styled(":confirm ", Style::default().fg(theme.dialog.help_label_text)),
-        Span::styled("Esc", Style::default().fg(theme.dialog.help_key_text).add_modifier(Modifier::BOLD)),
-        Span::styled(":cancel", Style::default().fg(theme.dialog.help_label_text)),
-    ]);
-    let help_area = Rect::new(inner.x + 1, help_y, inner.width - 2, 1);
-    frame.render_widget(Paragraph::new(help_line), help_area);
 }
 
 #[allow(dead_code)]
@@ -2020,110 +1832,6 @@ fn draw_tar_exclude_confirm_dialog(
     );
 }
 
-/// Copy/Move exclude confirmation dialog
-fn draw_copy_exclude_confirm_dialog(
-    frame: &mut Frame,
-    dialog: &Dialog,
-    state: &crate::ui::app::CopyExcludeState,
-    area: Rect,
-    theme: &Theme,
-) {
-    let title = if state.is_move {
-        " Move: Sensitive Symlinks "
-    } else {
-        " Copy: Sensitive Symlinks "
-    };
-    let block = Block::default()
-        .title(title)
-        .title_style(Style::default().fg(theme.dialog.tar_exclude_title).add_modifier(Modifier::BOLD))
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(theme.dialog.tar_exclude_border))
-        .style(Style::default().bg(theme.dialog.tar_exclude_bg));
-
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    // Message line
-    let msg = format!(
-        "Found {} symlink(s) pointing to sensitive paths:",
-        state.excluded_paths.len()
-    );
-    let msg_area = Rect::new(inner.x + 2, inner.y + 1, inner.width - 4, 1);
-    frame.render_widget(
-        Paragraph::new(msg).style(Style::default().fg(theme.dialog.tar_exclude_message_text)),
-        msg_area,
-    );
-
-    // List of excluded paths (scrollable)
-    let list_height = (inner.height - 5) as usize;
-    let visible_paths: Vec<&String> = state.excluded_paths
-        .iter()
-        .skip(state.scroll_offset)
-        .take(list_height)
-        .collect();
-
-    for (i, path) in visible_paths.iter().enumerate() {
-        let y = inner.y + 2 + i as u16;
-        let max_path_len = (inner.width - 6) as usize;
-        let display_path = if path.len() > max_path_len {
-            format!("  ...{}", safe_suffix(path, (inner.width - 9) as usize))
-        } else {
-            format!("  {}", path)
-        };
-        frame.render_widget(
-            Paragraph::new(display_path).style(Style::default().fg(theme.dialog.tar_exclude_path_text)),
-            Rect::new(inner.x + 2, y, inner.width - 4, 1),
-        );
-    }
-
-    // Scroll indicator if needed
-    if state.excluded_paths.len() > list_height {
-        let scroll_info = format!(
-            "[{}-{}/{}]",
-            state.scroll_offset + 1,
-            (state.scroll_offset + list_height).min(state.excluded_paths.len()),
-            state.excluded_paths.len()
-        );
-        let scroll_area = Rect::new(
-            inner.x + inner.width - scroll_info.len() as u16 - 2,
-            inner.y + 1,
-            scroll_info.len() as u16,
-            1,
-        );
-        frame.render_widget(
-            Paragraph::new(scroll_info).style(Style::default().fg(theme.dialog.tar_exclude_scroll_info)),
-            scroll_area,
-        );
-    }
-
-    // Buttons: Proceed / Cancel
-    let selected = dialog.selected_button;
-    let button_y = inner.y + inner.height - 2;
-
-    let normal_style = Style::default().fg(theme.dialog.tar_exclude_button_text);
-    let selected_style = Style::default()
-        .fg(theme.dialog.tar_exclude_button_selected_text)
-        .bg(theme.dialog.tar_exclude_button_selected_bg);
-
-    let btn_proceed = " Proceed ";
-    let btn_cancel = " Cancel ";
-
-    let proceed_style = if selected == 0 { selected_style } else { normal_style };
-    let cancel_style = if selected == 1 { selected_style } else { normal_style };
-
-    let btn_width = btn_proceed.len() + btn_cancel.len() + 4;
-    let btn_start = inner.x + (inner.width - btn_width as u16) / 2;
-
-    frame.render_widget(
-        Paragraph::new(btn_proceed).style(proceed_style),
-        Rect::new(btn_start, button_y, btn_proceed.len() as u16, 1),
-    );
-    frame.render_widget(
-        Paragraph::new(btn_cancel).style(cancel_style),
-        Rect::new(btn_start + btn_proceed.len() as u16 + 4, button_y, btn_cancel.len() as u16, 1),
-    );
-}
-
 /// Format file size for display
 fn format_size(bytes: u64) -> String {
     const KB: u64 = 1024;
@@ -2335,7 +2043,7 @@ pub fn handle_paste(app: &mut App, text: &str) {
                 dialog.input = chars.into_iter().collect();
                 dialog.cursor_pos += paste_len;
             }
-            DialogType::Goto | DialogType::Copy | DialogType::Move => {
+            DialogType::Goto => {
                 // Delete selection if exists
                 if let Some((sel_start, sel_end)) = dialog.selection.take() {
                     let mut chars: Vec<char> = dialog.input.chars().collect();
@@ -2512,9 +2220,6 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
                     _ => {}
                 }
             }
-            DialogType::Copy | DialogType::Move => {
-                return handle_copy_move_dialog_input(app, code, modifiers);
-            }
             DialogType::Goto => {
                 return handle_goto_dialog_input(app, code, modifiers);
             }
@@ -2526,9 +2231,6 @@ pub fn handle_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifiers
             }
             DialogType::TarExcludeConfirm => {
                 return handle_tar_exclude_confirm_input(app, code);
-            }
-            DialogType::CopyExcludeConfirm => {
-                return handle_copy_exclude_confirm_input(app, code);
             }
             DialogType::Settings => {
                 return handle_settings_dialog_input(app, code);
@@ -3394,216 +3096,6 @@ fn handle_goto_dialog_input(app: &mut App, code: KeyCode, modifiers: KeyModifier
     false
 }
 
-/// Copy/Move 다이얼로그 키 입력 처리
-fn handle_copy_move_dialog_input(app: &mut App, code: KeyCode, _modifiers: KeyModifiers) -> bool {
-    if let Some(ref mut dialog) = app.dialog {
-        let completion_visible = dialog
-            .completion
-            .as_ref()
-            .map(|c| c.visible && !c.suggestions.is_empty())
-            .unwrap_or(false);
-
-        match code {
-            KeyCode::Tab => {
-                if completion_visible {
-                    let (base_dir, _) = parse_path_for_completion(&dialog.input);
-                    let suggestion = dialog
-                        .completion
-                        .as_ref()
-                        .and_then(|c| c.suggestions.get(c.selected_index).cloned());
-
-                    if let Some(suggestion) = suggestion {
-                        apply_completion(dialog, &base_dir, &suggestion);
-                    }
-                    update_path_suggestions(dialog);
-                } else {
-                    trigger_path_completion(dialog);
-                }
-            }
-            KeyCode::BackTab | KeyCode::Up => {
-                if completion_visible {
-                    if let Some(ref mut completion) = dialog.completion {
-                        if !completion.suggestions.is_empty() {
-                            if completion.selected_index == 0 {
-                                completion.selected_index = completion.suggestions.len() - 1;
-                            } else {
-                                completion.selected_index -= 1;
-                            }
-                        }
-                    }
-                }
-            }
-            KeyCode::Down => {
-                if completion_visible {
-                    if let Some(ref mut completion) = dialog.completion {
-                        if !completion.suggestions.is_empty() {
-                            completion.selected_index =
-                                (completion.selected_index + 1) % completion.suggestions.len();
-                        }
-                    }
-                }
-            }
-            KeyCode::Enter => {
-                if completion_visible {
-                    let (base_dir, _) = parse_path_for_completion(&dialog.input);
-                    let suggestion = dialog
-                        .completion
-                        .as_ref()
-                        .and_then(|c| c.suggestions.get(c.selected_index).cloned());
-
-                    if let Some(suggestion) = suggestion {
-                        apply_completion(dialog, &base_dir, &suggestion);
-                    }
-                    update_path_suggestions(dialog);
-                    return false;
-                }
-
-                // 경로 검증
-                let input = dialog.input.clone();
-                if input.trim().is_empty() {
-                    app.show_message("Please enter a target path");
-                    return false;
-                }
-
-                // Check if target is a remote path (other panel is remote)
-                let target_panel_idx = 1 - app.active_panel_index;
-                let target_is_remote = app.panels.get(target_panel_idx)
-                    .map(|p| p.is_remote())
-                    .unwrap_or(false);
-
-                let target_path = if target_is_remote {
-                    // For remote targets, use the remote panel's current path
-                    // (the dialog input is display-only, actual path is the panel path)
-                    app.panels[target_panel_idx].path.clone()
-                } else {
-                    let path = expand_path_string(&input);
-                    if !path.exists() || !path.is_dir() {
-                        if let Some(ref mut completion) = dialog.completion {
-                            completion.visible = false;
-                            completion.suggestions.clear();
-                        }
-                        app.show_message(&format!("Invalid directory: {}", input));
-                        return false;
-                    }
-                    path
-                };
-
-                // 복사/이동 실행 (프로그레스바 버전)
-                let dialog_type = dialog.dialog_type;
-                app.dialog = None;
-
-                match dialog_type {
-                    DialogType::Copy => app.execute_copy_to_with_progress(&target_path),
-                    DialogType::Move => app.execute_move_to_with_progress(&target_path),
-                    _ => {}
-                }
-                return false;
-            }
-            KeyCode::Esc => {
-                if completion_visible {
-                    if let Some(ref mut completion) = dialog.completion {
-                        completion.visible = false;
-                        completion.suggestions.clear();
-                    }
-                } else {
-                    app.dialog = None;
-                }
-            }
-            KeyCode::Backspace => {
-                if dialog.cursor_pos > 0 {
-                    let mut chars: Vec<char> = dialog.input.chars().collect();
-                    chars.remove(dialog.cursor_pos - 1);
-                    dialog.input = chars.into_iter().collect();
-                    dialog.cursor_pos -= 1;
-                    update_path_suggestions(dialog);
-                }
-            }
-            KeyCode::Delete => {
-                let char_count = dialog.input.chars().count();
-                if dialog.cursor_pos < char_count {
-                    let mut chars: Vec<char> = dialog.input.chars().collect();
-                    chars.remove(dialog.cursor_pos);
-                    dialog.input = chars.into_iter().collect();
-                    update_path_suggestions(dialog);
-                }
-            }
-            KeyCode::Left => {
-                // 완성 이름 시작 위치 계산 (마지막 '/' 다음 위치)
-                let input_chars: Vec<char> = dialog.input.chars().collect();
-                let prefix_start = if dialog.input.ends_with('/') {
-                    input_chars.len()
-                } else {
-                    input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
-                };
-                if dialog.cursor_pos > prefix_start {
-                    dialog.cursor_pos -= 1;
-                }
-            }
-            KeyCode::Right => {
-                if dialog.cursor_pos < dialog.input.chars().count() {
-                    dialog.cursor_pos += 1;
-                }
-            }
-            KeyCode::Home => {
-                // 완성 이름 시작 위치로 이동
-                let input_chars: Vec<char> = dialog.input.chars().collect();
-                let prefix_start = if dialog.input.ends_with('/') {
-                    input_chars.len()
-                } else {
-                    input_chars.iter().rposition(|&c| c == '/').map(|i| i + 1).unwrap_or(0)
-                };
-                dialog.cursor_pos = prefix_start;
-            }
-            KeyCode::End => {
-                dialog.cursor_pos = dialog.input.chars().count();
-            }
-            KeyCode::Char(c) => {
-                if c == '/' && completion_visible {
-                    let (base_dir, _) = parse_path_for_completion(&dialog.input);
-                    let suggestion = dialog
-                        .completion
-                        .as_ref()
-                        .and_then(|comp| comp.suggestions.get(comp.selected_index).cloned());
-
-                    if let Some(suggestion) = suggestion {
-                        apply_completion(dialog, &base_dir, &suggestion);
-                    }
-                    update_path_suggestions(dialog);
-                } else if c == '~' {
-                    if let Some(home) = dirs::home_dir() {
-                        dialog.input = format!("{}/", home.display());
-                        dialog.cursor_pos = dialog.input.chars().count();
-                        update_path_suggestions(dialog);
-                    }
-                } else if c == '/' {
-                    // 연속 '/' 입력 방지
-                    let chars: Vec<char> = dialog.input.chars().collect();
-                    let prev_char = if dialog.cursor_pos > 0 {
-                        chars.get(dialog.cursor_pos - 1).copied()
-                    } else {
-                        None
-                    };
-                    if prev_char != Some('/') {
-                        let mut chars = chars;
-                        chars.insert(dialog.cursor_pos, c);
-                        dialog.input = chars.into_iter().collect();
-                        dialog.cursor_pos += 1;
-                        update_path_suggestions(dialog);
-                    }
-                } else {
-                    let mut chars: Vec<char> = dialog.input.chars().collect();
-                    chars.insert(dialog.cursor_pos, c);
-                    dialog.input = chars.into_iter().collect();
-                    dialog.cursor_pos += 1;
-                    update_path_suggestions(dialog);
-                }
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
 /// Handle progress dialog input (ESC to cancel)
 fn handle_progress_dialog_input(app: &mut App, code: KeyCode) -> bool {
     if code == KeyCode::Esc {
@@ -3664,60 +3156,6 @@ fn handle_tar_exclude_confirm_input(app: &mut App, code: KeyCode) -> bool {
                 app.tar_exclude_state = None;
                 app.dialog = None;
                 app.show_message("Tar operation cancelled");
-                return false;
-            }
-            _ => {}
-        }
-    }
-    false
-}
-
-/// Handle copy exclude confirmation dialog input
-fn handle_copy_exclude_confirm_input(app: &mut App, code: KeyCode) -> bool {
-    if let Some(ref mut dialog) = app.dialog {
-        match code {
-            KeyCode::Left | KeyCode::Right | KeyCode::Tab | KeyCode::BackTab => {
-                dialog.selected_button = if dialog.selected_button == 0 { 1 } else { 0 };
-            }
-            KeyCode::Up => {
-                if let Some(ref mut state) = app.copy_exclude_state {
-                    if state.scroll_offset > 0 {
-                        state.scroll_offset -= 1;
-                    }
-                }
-            }
-            KeyCode::Down => {
-                if let Some(ref mut state) = app.copy_exclude_state {
-                    if state.scroll_offset + 8 < state.excluded_paths.len() {
-                        state.scroll_offset += 1;
-                    }
-                }
-            }
-            KeyCode::Enter => {
-                if dialog.selected_button == 0 {
-                    // Proceed - execute copy/move (skip symlink check)
-                    if let Some(state) = app.copy_exclude_state.take() {
-                        app.dialog = None;
-                        if state.is_move {
-                            app.execute_move_to_with_progress_internal(&state.target_path);
-                        } else {
-                            app.execute_copy_to_with_progress_internal(&state.target_path);
-                        }
-                    }
-                } else {
-                    // Cancel
-                    let is_move = app.copy_exclude_state.as_ref().map(|s| s.is_move).unwrap_or(false);
-                    app.copy_exclude_state = None;
-                    app.dialog = None;
-                    app.show_message(if is_move { "Move operation cancelled" } else { "Copy operation cancelled" });
-                }
-                return false;
-            }
-            KeyCode::Esc => {
-                let is_move = app.copy_exclude_state.as_ref().map(|s| s.is_move).unwrap_or(false);
-                app.copy_exclude_state = None;
-                app.dialog = None;
-                app.show_message(if is_move { "Move operation cancelled" } else { "Copy operation cancelled" });
                 return false;
             }
             _ => {}
@@ -5079,7 +4517,7 @@ mod tests {
     #[test]
     fn test_dialog_creation() {
         let dialog = Dialog {
-            dialog_type: DialogType::Copy,
+            dialog_type: DialogType::Search,
             input: "/home/user/".to_string(),
             cursor_pos: 11,
             message: "Copy files".to_string(),
@@ -5089,7 +4527,7 @@ mod tests {
             use_md5: false,
         };
 
-        assert_eq!(dialog.dialog_type, DialogType::Copy);
+        assert_eq!(dialog.dialog_type, DialogType::Search);
         assert_eq!(dialog.input, "/home/user/");
         assert!(dialog.completion.is_some());
     }

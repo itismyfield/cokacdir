@@ -29,6 +29,8 @@ struct BotSettings {
     allowed_tools: Vec<String>,
     /// chat_id (string) → last working directory path
     last_sessions: HashMap<String, String>,
+    /// Telegram user ID of the registered owner (imprinting auth)
+    owner_user_id: Option<u64>,
 }
 
 impl Default for BotSettings {
@@ -36,6 +38,7 @@ impl Default for BotSettings {
         Self {
             allowed_tools: DEFAULT_ALLOWED_TOOLS.iter().map(|s| s.to_string()).collect(),
             last_sessions: HashMap::new(),
+            owner_user_id: None,
         }
     }
 }
@@ -83,15 +86,16 @@ fn load_bot_settings(token: &str) -> BotSettings {
     let Some(entry) = json.get(&key) else {
         return BotSettings::default();
     };
+    let owner_user_id = entry.get("owner_user_id").and_then(|v| v.as_u64());
     let Some(tools_arr) = entry.get("allowed_tools").and_then(|v| v.as_array()) else {
-        return BotSettings::default();
+        return BotSettings { owner_user_id, ..BotSettings::default() };
     };
     let tools: Vec<String> = tools_arr
         .iter()
         .filter_map(|v| v.as_str().map(String::from))
         .collect();
     if tools.is_empty() {
-        return BotSettings::default();
+        return BotSettings { owner_user_id, ..BotSettings::default() };
     }
     let last_sessions = entry.get("last_sessions")
         .and_then(|v| v.as_object())
@@ -101,7 +105,7 @@ fn load_bot_settings(token: &str) -> BotSettings {
                 .collect()
         })
         .unwrap_or_default();
-    BotSettings { allowed_tools: tools, last_sessions }
+    BotSettings { allowed_tools: tools, last_sessions, owner_user_id }
 }
 
 /// Save bot settings to bot_settings.json
@@ -118,10 +122,14 @@ fn save_bot_settings(token: &str, settings: &BotSettings) {
         serde_json::json!({})
     };
     let key = token_hash(token);
-    json[key] = serde_json::json!({
+    let mut entry = serde_json::json!({
         "allowed_tools": settings.allowed_tools,
         "last_sessions": settings.last_sessions,
     });
+    if let Some(owner_id) = settings.owner_user_id {
+        entry["owner_user_id"] = serde_json::json!(owner_id);
+    }
+    json[key] = entry;
     if let Ok(s) = serde_json::to_string_pretty(&json) {
         let _ = fs::write(&path, s);
     }
@@ -178,6 +186,12 @@ fn risk_badge(destructive: bool) -> &'static str {
 pub async fn run_bot(token: &str) {
     let bot = Bot::new(token);
     let bot_settings = load_bot_settings(token);
+
+    match bot_settings.owner_user_id {
+        Some(owner_id) => println!("  ✓ Owner: {owner_id}"),
+        None => println!("  ⚠ No owner registered — first user will be registered as owner"),
+    }
+
     let state: SharedState = Arc::new(Mutex::new(SharedData {
         sessions: HashMap::new(),
         settings: bot_settings,
@@ -207,10 +221,42 @@ async fn handle_message(
     token: &str,
 ) -> ResponseResult<()> {
     let chat_id = msg.chat.id;
-    let user_name = msg.from.as_ref()
+    let raw_user_name = msg.from.as_ref()
         .map(|u| u.first_name.as_str())
         .unwrap_or("unknown");
     let timestamp = chrono::Local::now().format("%H:%M:%S");
+    let user_id = msg.from.as_ref().map(|u| u.id.0);
+
+    // Auth check (imprinting)
+    let Some(uid) = user_id else {
+        // No user info (e.g. channel post) → reject
+        return Ok(());
+    };
+    let imprinted = {
+        let mut data = state.lock().await;
+        match data.settings.owner_user_id {
+            None => {
+                // Imprint: register first user as owner
+                data.settings.owner_user_id = Some(uid);
+                save_bot_settings(token, &data.settings);
+                println!("  [{timestamp}] ★ Owner registered: {raw_user_name} (id:{uid})");
+                true
+            }
+            Some(owner_id) => {
+                if uid != owner_id {
+                    // Unregistered user → reject silently (log only)
+                    println!("  [{timestamp}] ✗ Rejected: {raw_user_name} (id:{uid})");
+                    return Ok(());
+                }
+                false
+            }
+        }
+    };
+    if imprinted {
+        let _ = bot.send_message(chat_id, format!("✓ Registered as owner (id: {})", uid)).await;
+    }
+
+    let user_name = format!("{}({uid})", raw_user_name);
 
     // Handle file/photo uploads
     if msg.document().is_some() || msg.photo().is_some() {
@@ -663,8 +709,11 @@ async fn handle_file_upload(
         }
     };
 
-    // Save to session path
-    let dest = Path::new(&save_dir).join(&file_name);
+    // Save to session path (sanitize file_name to prevent path traversal)
+    let safe_name = Path::new(&file_name)
+        .file_name()
+        .unwrap_or_else(|| std::ffi::OsStr::new("uploaded_file"));
+    let dest = Path::new(&save_dir).join(safe_name);
     let file_size = buf.len();
     match fs::write(&dest, &buf) {
         Ok(_) => {

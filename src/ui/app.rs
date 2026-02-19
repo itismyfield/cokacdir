@@ -172,8 +172,6 @@ pub enum Screen {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DialogType {
-    Copy,
-    Move,
     Delete,
     Mkdir,
     Mkfile,
@@ -182,7 +180,6 @@ pub enum DialogType {
     Goto,
     Tar,
     TarExcludeConfirm,
-    CopyExcludeConfirm,
     LargeImageConfirm,
     LargeFileConfirm,
     TrueColorWarning,
@@ -560,19 +557,6 @@ pub struct TarExcludeState {
     pub excluded_paths: Vec<String>,
     /// Scroll offset for viewing excluded paths
     pub scroll_offset: usize,
-}
-
-/// State for copy/move exclude confirmation dialog
-#[derive(Debug, Clone)]
-pub struct CopyExcludeState {
-    /// Target path for copy/move
-    pub target_path: PathBuf,
-    /// Paths with sensitive symlinks
-    pub excluded_paths: Vec<String>,
-    /// Scroll offset for viewing excluded paths
-    pub scroll_offset: usize,
-    /// Whether this is a move operation (vs copy)
-    pub is_move: bool,
 }
 
 /// State for git log diff dialog
@@ -1423,9 +1407,6 @@ pub struct App {
     // Tar exclude confirmation state
     pub tar_exclude_state: Option<TarExcludeState>,
 
-    // Copy exclude confirmation state
-    pub copy_exclude_state: Option<CopyExcludeState>,
-
     // Help screen state
     pub help_state: HelpState,
 
@@ -1521,7 +1502,6 @@ impl App {
             pending_paste_focus: None,
             conflict_state: None,
             tar_exclude_state: None,
-            copy_exclude_state: None,
             help_state: HelpState::default(),
             settings_state: None,
             remote_connect_state: None,
@@ -1624,7 +1604,6 @@ impl App {
             pending_paste_focus: None,
             conflict_state: None,
             tar_exclude_state: None,
-            copy_exclude_state: None,
             help_state: HelpState::default(),
             settings_state: None,
             remote_connect_state: None,
@@ -3100,70 +3079,6 @@ impl App {
         }
     }
 
-    pub fn show_copy_dialog(&mut self) {
-        let files = self.get_operation_files();
-        if files.is_empty() {
-            self.show_message("No files selected");
-            return;
-        }
-        let file_list = if files.len() <= 3 {
-            files.join(", ")
-        } else {
-            format!("{} and {} more", files[..2].join(", "), files.len() - 2)
-        };
-        // For remote target panels, show user@host:/path format
-        let target = if self.target_panel().is_remote() {
-            let display = self.target_panel().display_path();
-            if display.ends_with('/') { display } else { format!("{}/", display) }
-        } else {
-            let path_str = self.target_panel().path.display().to_string();
-            if path_str.ends_with('/') { path_str } else { format!("{}/", path_str) }
-        };
-        let cursor_pos = target.chars().count();
-        self.dialog = Some(Dialog {
-            dialog_type: DialogType::Copy,
-            input: target,
-            cursor_pos,
-            message: file_list.clone(),
-            completion: Some(PathCompletion::default()),
-            selected_button: 0,
-            selection: None,
-            use_md5: false,
-        });
-    }
-
-    pub fn show_move_dialog(&mut self) {
-        let files = self.get_operation_files();
-        if files.is_empty() {
-            self.show_message("No files selected");
-            return;
-        }
-        let file_list = if files.len() <= 3 {
-            files.join(", ")
-        } else {
-            format!("{} and {} more", files[..2].join(", "), files.len() - 2)
-        };
-        // For remote target panels, show user@host:/path format
-        let target = if self.target_panel().is_remote() {
-            let display = self.target_panel().display_path();
-            if display.ends_with('/') { display } else { format!("{}/", display) }
-        } else {
-            let path_str = self.target_panel().path.display().to_string();
-            if path_str.ends_with('/') { path_str } else { format!("{}/", path_str) }
-        };
-        let cursor_pos = target.chars().count();
-        self.dialog = Some(Dialog {
-            dialog_type: DialogType::Move,
-            input: target,
-            cursor_pos,
-            message: file_list.clone(),
-            completion: Some(PathCompletion::default()),
-            selected_button: 0,
-            selection: None,
-            use_md5: false,
-        });
-    }
-
     pub fn show_delete_dialog(&mut self) {
         let files = self.get_operation_files();
         if files.is_empty() {
@@ -3712,476 +3627,6 @@ impl App {
         }
     }
 
-    // File operations
-    #[allow(dead_code)]
-    pub fn execute_copy(&mut self) {
-        let target_path = self.target_panel().path.clone();
-        self.execute_copy_to(&target_path);
-    }
-
-    pub fn execute_copy_to(&mut self, target_path: &Path) {
-        let files = self.get_operation_files();
-        let source_path = self.active_panel().path.clone();
-
-        let mut success_count = 0;
-        let mut last_error = String::new();
-
-        for file_name in &files {
-            let src = source_path.join(file_name);
-            let dest = target_path.join(file_name);
-            match file_ops::copy_file(&src, &dest) {
-                Ok(_) => success_count += 1,
-                Err(e) => last_error = e.to_string(),
-            }
-        }
-
-        if success_count == files.len() {
-            self.show_message(&format!("Copied {} file(s)", success_count));
-        } else {
-            self.show_message(&format!("Copied {}/{}. Error: {}", success_count, files.len(), last_error));
-        }
-        self.refresh_panels();
-    }
-
-    /// Execute copy with progress dialog (with sensitive symlink check and conflict detection)
-    pub fn execute_copy_to_with_progress(&mut self, target_path: &Path) {
-        let files = self.get_operation_files();
-        if files.is_empty() {
-            self.show_message("No files selected");
-            return;
-        }
-
-        let source_path = self.active_panel().path.clone();
-
-        // Skip sensitive symlink check for remote sources (local filesystem check is invalid)
-        let sensitive_symlinks = if self.active_panel().is_remote() {
-            Vec::new()
-        } else {
-            file_ops::filter_sensitive_symlinks_for_copy(&source_path, &files)
-        };
-
-        if !sensitive_symlinks.is_empty() {
-            // Show confirmation dialog
-            self.copy_exclude_state = Some(CopyExcludeState {
-                target_path: target_path.to_path_buf(),
-                excluded_paths: sensitive_symlinks,
-                scroll_offset: 0,
-                is_move: false,
-            });
-            self.dialog = Some(Dialog {
-                dialog_type: DialogType::CopyExcludeConfirm,
-                input: String::new(),
-                cursor_pos: 0,
-                message: String::new(),
-                completion: None,
-                selected_button: 0,
-                selection: None,
-                use_md5: false,
-            });
-            return;
-        }
-
-        // Detect conflicts (skip for remote targets — local exists() check is invalid)
-        let source_remote = self.active_panel().is_remote();
-        let target_panel_idx = 1 - self.active_panel_index;
-        let target_remote = self.panels.get(target_panel_idx)
-            .map(|p| p.is_remote())
-            .unwrap_or(false);
-
-        if !source_remote && !target_remote {
-            let conflicts = self.detect_operation_conflicts(&source_path, target_path, &files);
-
-            if !conflicts.is_empty() {
-                // Create temporary clipboard for conflict resolution
-                let clipboard = Clipboard {
-                    files: files.clone(),
-                    source_path: source_path.clone(),
-                    operation: ClipboardOperation::Copy,
-                    source_remote_profile: None,
-                };
-                self.conflict_state = Some(ConflictState {
-                    conflicts,
-                    current_index: 0,
-                    files_to_overwrite: Vec::new(),
-                    files_to_skip: Vec::new(),
-                    clipboard_backup: Some(clipboard),
-                    is_move_operation: false,
-                    target_path: target_path.to_path_buf(),
-                });
-                self.show_duplicate_conflict_dialog();
-                return;
-            }
-        }
-
-        // No conflicts or remote transfer - proceed directly
-        self.execute_copy_to_with_progress_internal(target_path);
-    }
-
-    /// Execute copy with progress dialog (internal - no symlink check)
-    pub fn execute_copy_to_with_progress_internal(&mut self, target_path: &Path) {
-        let files = self.get_operation_files();
-        if files.is_empty() {
-            self.show_message("No files selected");
-            return;
-        }
-
-        let source_path = self.active_panel().path.clone();
-        let target_path = target_path.to_path_buf();
-
-        let source_remote = self.active_panel().is_remote();
-        // Detect if target is on a remote panel by checking the other panel
-        let target_panel_idx = 1 - self.active_panel_index;
-        let target_remote = self.panels.get(target_panel_idx)
-            .map(|p| p.is_remote())
-            .unwrap_or(false);
-
-        // Create progress state
-        let mut progress = FileOperationProgress::new(FileOperationType::Copy);
-        progress.is_active = true;
-        let cancel_flag = progress.cancel_flag.clone();
-
-        // Create channel for progress messages
-        let (tx, rx) = mpsc::channel();
-        progress.receiver = Some(rx);
-
-        // Convert files to PathBuf
-        let file_paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
-
-        if source_remote || target_remote {
-            // Set total files count immediately for remote transfers
-            // (channel TotalProgress message from thread may arrive after first UI draw)
-            progress.total_files = file_paths.len();
-            if source_remote && target_remote {
-                // Remote-to-remote: download to local temp, then upload
-                let source_profile = self.active_panel().remote_ctx.as_ref().map(|c| c.profile.clone());
-                let target_profile = self.panels.get(target_panel_idx)
-                    .and_then(|p| p.remote_ctx.as_ref().map(|c| c.profile.clone()));
-
-                match (source_profile, target_profile) {
-                    (Some(src_prof), Some(tgt_prof)) => {
-                        let source_base = source_path.display().to_string();
-                        let target = target_path.display().to_string();
-
-                        thread::spawn(move || {
-                            remote_transfer::transfer_remote_to_remote_with_progress(
-                                src_prof,
-                                tgt_prof,
-                                file_paths,
-                                source_base,
-                                target,
-                                cancel_flag,
-                                tx,
-                                false, // is_cut: copy operation
-                            );
-                        });
-                    }
-                    _ => {
-                        self.show_message("Error: Remote profile not found");
-                        return;
-                    }
-                }
-            } else {
-                // One-direction remote transfer: use rsync/scp
-                let profile = if source_remote {
-                    self.active_panel().remote_ctx.as_ref().map(|c| c.profile.clone())
-                } else {
-                    // Use the other panel's remote profile
-                    self.panels.get(target_panel_idx)
-                        .and_then(|p| p.remote_ctx.as_ref().map(|c| c.profile.clone()))
-                };
-
-                if let Some(profile) = profile {
-                    let direction = if source_remote {
-                        remote_transfer::TransferDirection::RemoteToLocal
-                    } else {
-                        remote_transfer::TransferDirection::LocalToRemote
-                    };
-
-                    let source_base = source_path.display().to_string();
-                    let target = target_path.display().to_string();
-
-                    let config = remote_transfer::TransferConfig {
-                        direction,
-                        profile,
-                        source_files: file_paths,
-                        source_base,
-                        target_path: target,
-                    };
-
-                    thread::spawn(move || {
-                        remote_transfer::transfer_files_with_progress(
-                            config, cancel_flag, tx, false, None, // copy operation
-                        );
-                    });
-                } else {
-                    self.show_message("Error: Remote profile not found");
-                    return;
-                }
-            }
-        } else {
-            // Local copy
-            thread::spawn(move || {
-                file_ops::copy_files_with_progress(
-                    file_paths,
-                    &source_path,
-                    &target_path,
-                    HashSet::new(),
-                    HashSet::new(),
-                    cancel_flag,
-                    tx,
-                );
-            });
-        }
-
-        // Store progress state and show dialog
-        self.file_operation_progress = Some(progress);
-        self.dialog = Some(Dialog {
-            dialog_type: DialogType::Progress,
-            input: String::new(),
-            cursor_pos: 0,
-            message: String::new(),
-            completion: None,
-            selected_button: 0,
-            selection: None,
-            use_md5: false,
-        });
-    }
-
-    #[allow(dead_code)]
-    pub fn execute_move(&mut self) {
-        let target_path = self.target_panel().path.clone();
-        self.execute_move_to(&target_path);
-    }
-
-    pub fn execute_move_to(&mut self, target_path: &Path) {
-        let files = self.get_operation_files();
-        let source_path = self.active_panel().path.clone();
-
-        let mut success_count = 0;
-        let mut last_error = String::new();
-
-        for file_name in &files {
-            let src = source_path.join(file_name);
-            let dest = target_path.join(file_name);
-            match file_ops::move_file(&src, &dest) {
-                Ok(_) => success_count += 1,
-                Err(e) => last_error = e.to_string(),
-            }
-        }
-
-        if success_count == files.len() {
-            self.show_message(&format!("Moved {} file(s)", success_count));
-        } else {
-            self.show_message(&format!("Moved {}/{}. Error: {}", success_count, files.len(), last_error));
-        }
-        self.refresh_panels();
-    }
-
-    /// Execute move with progress dialog (with sensitive symlink check)
-    pub fn execute_move_to_with_progress(&mut self, target_path: &Path) {
-        let files = self.get_operation_files();
-        if files.is_empty() {
-            self.show_message("No files selected");
-            return;
-        }
-
-        let source_path = self.active_panel().path.clone();
-        let source_remote = self.active_panel().is_remote();
-        let target_panel_idx = 1 - self.active_panel_index;
-        let target_remote = self.panels.get(target_panel_idx)
-            .map(|p| p.is_remote())
-            .unwrap_or(false);
-
-        // Skip sensitive symlink check for remote sources
-        if !source_remote {
-            let sensitive_symlinks = file_ops::filter_sensitive_symlinks_for_copy(&source_path, &files);
-
-            if !sensitive_symlinks.is_empty() {
-                // Show confirmation dialog
-                self.copy_exclude_state = Some(CopyExcludeState {
-                    target_path: target_path.to_path_buf(),
-                    excluded_paths: sensitive_symlinks,
-                    scroll_offset: 0,
-                    is_move: true,
-                });
-                self.dialog = Some(Dialog {
-                    dialog_type: DialogType::CopyExcludeConfirm,
-                    input: String::new(),
-                    cursor_pos: 0,
-                    message: String::new(),
-                    completion: None,
-                    selected_button: 0,
-                    selection: None,
-                    use_md5: false,
-                });
-                return;
-            }
-        }
-
-        // Skip conflict detection for remote transfers
-        if !source_remote && !target_remote {
-            let conflicts = self.detect_operation_conflicts(&source_path, target_path, &files);
-
-            if !conflicts.is_empty() {
-                // Create temporary clipboard for conflict resolution
-                let clipboard = Clipboard {
-                    files: files.clone(),
-                    source_path: source_path.clone(),
-                    operation: ClipboardOperation::Cut,
-                    source_remote_profile: None,
-                };
-                self.conflict_state = Some(ConflictState {
-                    conflicts,
-                    current_index: 0,
-                    files_to_overwrite: Vec::new(),
-                    files_to_skip: Vec::new(),
-                    clipboard_backup: Some(clipboard),
-                    is_move_operation: true,
-                    target_path: target_path.to_path_buf(),
-                });
-                self.show_duplicate_conflict_dialog();
-                return;
-            }
-        }
-
-        // No conflicts - proceed directly
-        self.execute_move_to_with_progress_internal(target_path);
-    }
-
-    /// Execute move with progress dialog (internal - no symlink check)
-    pub fn execute_move_to_with_progress_internal(&mut self, target_path: &Path) {
-        let files = self.get_operation_files();
-        if files.is_empty() {
-            self.show_message("No files selected");
-            return;
-        }
-
-        let source_path = self.active_panel().path.clone();
-        let target_path = target_path.to_path_buf();
-
-        let source_remote = self.active_panel().is_remote();
-        let target_panel_idx = 1 - self.active_panel_index;
-        let target_remote = self.panels.get(target_panel_idx)
-            .map(|p| p.is_remote())
-            .unwrap_or(false);
-
-        // Create progress state
-        let mut progress = FileOperationProgress::new(FileOperationType::Move);
-        progress.is_active = true;
-        let cancel_flag = progress.cancel_flag.clone();
-
-        // Create channel for progress messages
-        let (tx, rx) = mpsc::channel();
-        progress.receiver = Some(rx);
-
-        // Convert files to PathBuf
-        let file_paths: Vec<PathBuf> = files.iter().map(PathBuf::from).collect();
-
-        if source_remote || target_remote {
-            // Remote move: use rsync transfer with is_cut=true (same pattern as copy)
-            progress.total_files = file_paths.len();
-            if source_remote && target_remote {
-                // Remote-to-remote move
-                let source_profile = self.active_panel().remote_ctx.as_ref().map(|c| c.profile.clone());
-                let target_profile = self.panels.get(target_panel_idx)
-                    .and_then(|p| p.remote_ctx.as_ref().map(|c| c.profile.clone()));
-
-                match (source_profile, target_profile) {
-                    (Some(src_prof), Some(tgt_prof)) => {
-                        let source_base = source_path.display().to_string();
-                        let target = target_path.display().to_string();
-
-                        thread::spawn(move || {
-                            remote_transfer::transfer_remote_to_remote_with_progress(
-                                src_prof,
-                                tgt_prof,
-                                file_paths,
-                                source_base,
-                                target,
-                                cancel_flag,
-                                tx,
-                                true, // is_cut
-                            );
-                        });
-                    }
-                    _ => {
-                        self.show_message("Error: Remote profile not found");
-                        return;
-                    }
-                }
-            } else {
-                // One-direction remote move
-                let profile = if source_remote {
-                    self.active_panel().remote_ctx.as_ref().map(|c| c.profile.clone())
-                } else {
-                    self.panels.get(target_panel_idx)
-                        .and_then(|p| p.remote_ctx.as_ref().map(|c| c.profile.clone()))
-                };
-
-                if let Some(profile) = profile {
-                    let direction = if source_remote {
-                        remote_transfer::TransferDirection::RemoteToLocal
-                    } else {
-                        remote_transfer::TransferDirection::LocalToRemote
-                    };
-
-                    // For cut: source_profile for remote source deletion
-                    let source_profile_for_delete = if source_remote {
-                        self.active_panel().remote_ctx.as_ref().map(|c| c.profile.clone())
-                    } else {
-                        None
-                    };
-
-                    let source_base = source_path.display().to_string();
-                    let target = target_path.display().to_string();
-
-                    let config = remote_transfer::TransferConfig {
-                        direction,
-                        profile,
-                        source_files: file_paths,
-                        source_base,
-                        target_path: target,
-                    };
-
-                    thread::spawn(move || {
-                        remote_transfer::transfer_files_with_progress(
-                            config, cancel_flag, tx, true, source_profile_for_delete,
-                        );
-                    });
-                } else {
-                    self.show_message("Error: Remote profile not found");
-                    return;
-                }
-            }
-        } else {
-            // Local-to-local move: use existing optimized move (rename)
-            thread::spawn(move || {
-                file_ops::move_files_with_progress(
-                    file_paths,
-                    &source_path,
-                    &target_path,
-                    HashSet::new(),
-                    HashSet::new(),
-                    cancel_flag,
-                    tx,
-                );
-            });
-        }
-
-        // Store progress state and show dialog
-        self.file_operation_progress = Some(progress);
-        self.dialog = Some(Dialog {
-            dialog_type: DialogType::Progress,
-            input: String::new(),
-            cursor_pos: 0,
-            message: String::new(),
-            completion: None,
-            selected_button: 0,
-            selection: None,
-            use_md5: false,
-        });
-    }
-
     pub fn execute_delete(&mut self) {
         // 이미지 뷰어에서 삭제 시 현재 보고 있는 이미지 삭제
         if self.current_screen == Screen::ImageViewer {
@@ -4652,27 +4097,6 @@ impl App {
                     .unwrap_or(0)));
             }
         }
-    }
-
-    /// Detect files that would conflict (already exist) at copy/move destination
-    fn detect_operation_conflicts(
-        &self,
-        source_dir: &Path,
-        target_dir: &Path,
-        files: &[String],
-    ) -> Vec<(PathBuf, PathBuf, String)> {
-        let mut conflicts = Vec::new();
-
-        for file_name in files {
-            let src = source_dir.join(file_name);
-            let dest = target_dir.join(file_name);
-
-            if dest.exists() {
-                conflicts.push((src, dest, file_name.clone()));
-            }
-        }
-
-        conflicts
     }
 
     /// Show the duplicate conflict dialog
@@ -6888,9 +6312,8 @@ mod tests {
 
     #[test]
     fn test_dialog_type_equality() {
-        assert_eq!(DialogType::Copy, DialogType::Copy);
         assert_eq!(DialogType::Delete, DialogType::Delete);
-        assert_ne!(DialogType::Copy, DialogType::Move);
+        assert_ne!(DialogType::Delete, DialogType::Mkdir);
     }
 
     // ========== Clipboard tests ==========

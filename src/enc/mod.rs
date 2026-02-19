@@ -611,8 +611,17 @@ fn unpack_file_group(
         ));
     }
 
-    // Rename to original filename
-    let out_path = dir.join(&original_name);
+    // Rename to original filename (sanitize to prevent path traversal)
+    let safe_name = match Path::new(&original_name).file_name().and_then(|n| n.to_str()) {
+        Some(name) => name,
+        None => {
+            let _ = fs::remove_file(&temp_path);
+            return Err(CokacencError::MetadataParse(
+                format!("Invalid filename in metadata: {}", original_name),
+            ));
+        }
+    };
+    let out_path = dir.join(safe_name);
     fs::rename(&temp_path, &out_path)?;
 
     // Restore permissions
@@ -639,5 +648,5 @@ fn unpack_file_group(
         }
     }
 
-    Ok(original_name)
+    Ok(safe_name.to_string())
 }
