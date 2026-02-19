@@ -1,5 +1,6 @@
+import { useState } from 'react'
 import { motion } from 'framer-motion'
-import { Columns, Search, Image, Bookmark, Wifi, Eye, Settings2, Activity, ArrowLeftRight, GitBranch, GitCommit, Keyboard, Lock } from 'lucide-react'
+import { Columns, Search, Image, Bookmark, Wifi, Eye, Settings2, Activity, ArrowLeftRight, GitBranch, GitCommit, Keyboard, Lock, Copy, Check, Terminal } from 'lucide-react'
 import { useLanguage } from './tutorial/LanguageContext'
 
 interface SubFeature {
@@ -14,6 +15,43 @@ interface Pillar {
   borderColor: string
   iconBg: string
   subFeatures: SubFeature[]
+}
+
+function InstallCommand() {
+  const { t } = useLanguage()
+  const [copied, setCopied] = useState(false)
+  const cmd = '/bin/bash -c "$(curl -fsSL https://cokacdir.cokac.com/install.sh)"'
+
+  const handleCopy = () => {
+    navigator.clipboard.writeText(cmd)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 2000)
+  }
+
+  return (
+    <div className="mt-6 max-w-2xl mx-auto">
+      <div className="flex items-center justify-center gap-2 mb-2">
+        <Terminal className="w-3.5 h-3.5 text-accent-cyan" />
+        <span className="text-xs font-medium tracking-wide uppercase text-zinc-400">{t('Quick Install', '빠른 설치')}</span>
+      </div>
+      <div
+        onClick={handleCopy}
+        className="flex items-center gap-3 bg-bg-card border border-zinc-800 hover:border-accent-cyan/40 rounded-lg px-4 py-3 cursor-pointer transition-colors group"
+      >
+        <code className="flex-1 text-accent-cyan text-xs sm:text-sm font-mono truncate">{cmd}</code>
+        <button className="shrink-0 text-zinc-500 group-hover:text-accent-cyan transition-colors">
+          {copied ? <Check className="w-4 h-4 text-accent-green" /> : <Copy className="w-4 h-4" />}
+        </button>
+      </div>
+      <div className="flex items-center justify-center gap-3 mt-2 text-zinc-500 text-xs">
+        <span>macOS</span>
+        <span className="text-zinc-700">·</span>
+        <span>Linux</span>
+        <span className="text-zinc-700">·</span>
+        <span>Windows WSL</span>
+      </div>
+    </div>
+  )
 }
 
 export default function Features() {
@@ -94,6 +132,7 @@ export default function Features() {
               'cokacdir는 본격적인 터미널 파일 관리자이기도 합니다. 탐색, 편집, 버전 관리를 손쉽게.'
             )}
           </p>
+          <InstallCommand />
         </motion.div>
 
         {/* Pillar blocks - zigzag layout */}

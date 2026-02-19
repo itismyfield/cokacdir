@@ -1,4 +1,4 @@
-import { Github, FileText, Cpu, GraduationCap, Cloud, Apple, Zap } from 'lucide-react'
+import { Github, Youtube, FileText, Cpu, GraduationCap, Cloud, Apple, Zap } from 'lucide-react'
 import { Link } from 'react-router-dom'
 import { useLanguage } from './tutorial/LanguageContext'
 
@@ -25,6 +25,15 @@ export default function Footer() {
             >
               <Github className="w-5 h-5" />
               <span className="text-sm">GitHub</span>
+            </a>
+            <a
+              href="https://www.youtube.com/@코드깎는노인"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-2 text-zinc-400 hover:text-white transition-colors"
+            >
+              <Youtube className="w-5 h-5" />
+              <span className="text-sm">YouTube</span>
             </a>
             <span className="flex items-center gap-2 text-zinc-500">
               <Cpu className="w-5 h-5" />
