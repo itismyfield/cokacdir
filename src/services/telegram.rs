@@ -262,8 +262,7 @@ async fn handle_message(
     // Handle file/photo uploads
     if msg.document().is_some() || msg.photo().is_some() {
         let file_hint = if msg.document().is_some() { "document" } else { "photo" };
-        let caption_hint = msg.caption().map(|c| format!(" + caption: \"{}\"", truncate_str(c, 40))).unwrap_or_default();
-        println!("  [{timestamp}] ◀ [{user_name}] Upload: {file_hint}{caption_hint}");
+        println!("  [{timestamp}] ◀ [{user_name}] Upload: {file_hint}");
         let result = handle_file_upload(&bot, chat_id, &msg, &state).await;
         println!("  [{timestamp}] ▶ [{user_name}] Upload complete");
         return result;
@@ -657,8 +656,6 @@ async fn handle_down_command(
 }
 
 /// Handle file/photo upload - save to current session path
-/// If a caption is present, it is forwarded to Claude AI as a user message
-/// so the AI knows what to do with the uploaded file.
 async fn handle_file_upload(
     bot: &Bot,
     chat_id: ChatId,
@@ -741,16 +738,6 @@ async fn handle_file_upload(
             });
             session.pending_uploads.push(upload_record);
             save_session_to_file(session, &save_dir);
-        }
-    }
-
-    // If the user included a caption with the file, treat it as a message to Claude AI
-    // so the user can upload a file and give instructions in one step.
-    // The pending_uploads will be prepended to the caption prompt automatically.
-    if let Some(caption) = msg.caption() {
-        let caption = caption.trim();
-        if !caption.is_empty() {
-            handle_text_message(bot, chat_id, caption, state).await?;
         }
     }
 
@@ -1097,6 +1084,7 @@ async fn handle_text_message(
         let mut cancelled = false;
         let mut new_session_id: Option<String> = None;
         let mut spin_idx: usize = 0;
+        let mut last_edit_at = tokio::time::Instant::now();
 
         while !done {
             // Check cancel token
@@ -1192,7 +1180,7 @@ async fn handle_text_message(
                 format!("{}\n\n{}", truncated, indicator)
             };
 
-            if display_text != last_edit_text {
+            if display_text != last_edit_text && !done {
                 let html_text = markdown_to_telegram_html(&display_text);
                 if let Err(e) = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_text)
                     .parse_mode(ParseMode::Html)
@@ -1201,6 +1189,7 @@ async fn handle_text_message(
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}]   ⚠ edit_message failed (streaming): {e}");
                 }
+                last_edit_at = tokio::time::Instant::now();
                 last_edit_text = display_text;
             }
         }
@@ -1233,6 +1222,13 @@ async fn handle_text_message(
                 let normalized = normalize_empty_lines(&full_response);
                 format!("{}\n\n[Stopped]", normalized)
             };
+
+            // Ensure at least 3s since last streaming edit to avoid Telegram rate limit
+            let elapsed = last_edit_at.elapsed();
+            let min_gap = tokio::time::Duration::from_millis(3000);
+            if elapsed < min_gap {
+                tokio::time::sleep(min_gap - elapsed).await;
+            }
 
             // Update placeholder message with partial response instead of deleting
             let html_stopped = markdown_to_telegram_html(&stopped_response);
@@ -1298,6 +1294,13 @@ async fn handle_text_message(
             }
 
             return;
+        }
+
+        // Ensure at least 3s since last streaming edit to avoid Telegram rate limit
+        let elapsed = last_edit_at.elapsed();
+        let min_gap = tokio::time::Duration::from_millis(3000);
+        if elapsed < min_gap {
+            tokio::time::sleep(min_gap - elapsed).await;
         }
 
         // Final response
