@@ -41,8 +41,8 @@ fn print_help() {
     println!("    --design                Enable theme hot-reload (for theme development)");
     println!("    --base64 <TEXT>         Decode base64 and print (internal use)");
     println!("    --ccserver <TOKEN>...   Start Telegram bot server(s)");
-    println!("    --sendfile <PATH> --chat <ID> --key <TOKEN>");
-    println!("                            Send file via Telegram bot (internal use)");
+    println!("    --sendfile <PATH> --chat <ID> --key <HASH>");
+    println!("                            Send file via Telegram bot (internal use, HASH = token hash)");
     println!();
     println!("HOMEPAGE: https://cokacdir.cokac.com");
 }
@@ -63,11 +63,19 @@ fn handle_base64(encoded: &str) {
     }
 }
 
-fn handle_sendfile(path: &str, chat_id: i64, token: &str) {
+fn handle_sendfile(path: &str, chat_id: i64, hash_key: &str) {
     use teloxide::prelude::*;
+    use crate::services::telegram::resolve_token_by_hash;
+    let token = match resolve_token_by_hash(hash_key) {
+        Some(t) => t,
+        None => {
+            eprintln!("Error: no bot token found for hash key: {}", hash_key);
+            std::process::exit(1);
+        }
+    };
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
     rt.block_on(async {
-        let bot = Bot::new(token);
+        let bot = Bot::new(&token);
         let file_path = std::path::Path::new(path);
         if !file_path.exists() {
             eprintln!("Error: file not found: {}", path);
@@ -279,8 +287,8 @@ fn main() -> io::Result<()> {
                         handle_sendfile(&fp, cid, &k);
                     }
                     _ => {
-                        eprintln!("Error: --sendfile requires <PATH>, --chat <ID>, and --key <TOKEN>");
-                        eprintln!("Usage: cokacdir --sendfile <PATH> --chat <ID> --key <TOKEN>");
+                        eprintln!("Error: --sendfile requires <PATH>, --chat <ID>, and --key <HASH>");
+                        eprintln!("Usage: cokacdir --sendfile <PATH> --chat <ID> --key <HASH>");
                     }
                 }
                 return Ok(());

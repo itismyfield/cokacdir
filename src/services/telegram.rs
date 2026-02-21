@@ -21,6 +21,8 @@ struct ChatSession {
     /// File upload records not yet sent to Claude AI.
     /// Drained and prepended to the next user prompt so Claude knows about uploaded files.
     pending_uploads: Vec<String>,
+    /// Set to true by /clear to prevent a racing polling loop from re-populating history.
+    cleared: bool,
 }
 
 /// Bot-level settings persisted to disk
@@ -51,6 +53,8 @@ struct SharedData {
     cancel_tokens: HashMap<ChatId, Arc<CancelToken>>,
     /// Message ID of the "Stopping..." message sent by /stop, so the polling loop can update it
     stop_message_ids: HashMap<ChatId, teloxide::types::MessageId>,
+    /// Per-chat timestamp of the last Telegram API call (for rate limiting)
+    api_timestamps: HashMap<ChatId, tokio::time::Instant>,
 }
 
 type SharedState = Arc<Mutex<SharedData>>;
@@ -59,7 +63,7 @@ type SharedState = Arc<Mutex<SharedData>>;
 const TELEGRAM_MSG_LIMIT: usize = 4096;
 
 /// Compute a short hash key from the bot token (first 16 chars of SHA-256 hex)
-fn token_hash(token: &str) -> String {
+pub fn token_hash(token: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(token.as_bytes());
     let result = hasher.finalize();
@@ -123,6 +127,7 @@ fn save_bot_settings(token: &str, settings: &BotSettings) {
     };
     let key = token_hash(token);
     let mut entry = serde_json::json!({
+        "token": token,
         "allowed_tools": settings.allowed_tools,
         "last_sessions": settings.last_sessions,
     });
@@ -133,6 +138,16 @@ fn save_bot_settings(token: &str, settings: &BotSettings) {
     if let Ok(s) = serde_json::to_string_pretty(&json) {
         let _ = fs::write(&path, s);
     }
+}
+
+/// Resolve a bot token from its hash by searching bot_settings.json
+pub fn resolve_token_by_hash(hash: &str) -> Option<String> {
+    let path = bot_settings_path()?;
+    let content = fs::read_to_string(&path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let obj = json.as_object()?;
+    let entry = obj.get(hash)?;
+    entry.get("token").and_then(|v| v.as_str()).map(String::from)
 }
 
 /// Normalize tool name: first letter uppercase, rest lowercase
@@ -197,6 +212,7 @@ pub async fn run_bot(token: &str) {
         settings: bot_settings,
         cancel_tokens: HashMap::new(),
         stop_message_ids: HashMap::new(),
+        api_timestamps: HashMap::new(),
     }));
 
     println!("  ✓ Bot connected — Listening for messages");
@@ -287,6 +303,7 @@ async fn handle_message(
                         current_path: None,
                         history: Vec::new(),
                         pending_uploads: Vec::new(),
+                        cleared: false,
                     });
                     session.current_path = Some(last_path.clone());
                     if let Some((session_data, _)) = existing {
@@ -305,6 +322,7 @@ async fn handle_message(
         let data = state.lock().await;
         if data.cancel_tokens.contains_key(&chat_id) {
             drop(data);
+            shared_rate_limit_wait(&state, chat_id).await;
             bot.send_message(chat_id, "AI request in progress. Use /stop to cancel.")
                 .await?;
             return Ok(());
@@ -316,7 +334,7 @@ async fn handle_message(
         handle_stop_command(&bot, chat_id, &state).await?;
     } else if text.starts_with("/help") {
         println!("  [{timestamp}] ◀ [{user_name}] /help");
-        handle_help_command(&bot, chat_id).await?;
+        handle_help_command(&bot, chat_id, &state).await?;
     } else if text.starts_with("/start") {
         println!("  [{timestamp}] ◀ [{user_name}] /start");
         handle_start_command(&bot, chat_id, &text, &state, token).await?;
@@ -332,7 +350,7 @@ async fn handle_message(
         handle_down_command(&bot, chat_id, &text, &state).await?;
     } else if text.starts_with("/availabletools") {
         println!("  [{timestamp}] ◀ [{user_name}] /availabletools");
-        handle_availabletools_command(&bot, chat_id).await?;
+        handle_availabletools_command(&bot, chat_id, &state).await?;
     } else if text.starts_with("/allowedtools") {
         println!("  [{timestamp}] ◀ [{user_name}] /allowedtools");
         handle_allowedtools_command(&bot, chat_id, &state).await?;
@@ -355,6 +373,7 @@ async fn handle_message(
 async fn handle_help_command(
     bot: &Bot,
     chat_id: ChatId,
+    state: &SharedState,
 ) -> ResponseResult<()> {
     let help = "\
 <b>cokacdir Telegram Bot</b>
@@ -387,6 +406,7 @@ AI can read, edit, and run commands in your session.
 
 <code>/help</code> — Show this help";
 
+    shared_rate_limit_wait(state, chat_id).await;
     bot.send_message(chat_id, help)
         .parse_mode(ParseMode::Html)
         .await?;
@@ -408,6 +428,7 @@ async fn handle_start_command(
     let canonical_path = if path_str.is_empty() {
         // Create random workspace directory
         let Some(home) = dirs::home_dir() else {
+            shared_rate_limit_wait(state, chat_id).await;
             bot.send_message(chat_id, "Error: cannot determine home directory.")
                 .await?;
             return Ok(());
@@ -421,6 +442,7 @@ async fn handle_start_command(
             .collect();
         let new_dir = workspace_dir.join(&random_name);
         if let Err(e) = fs::create_dir_all(&new_dir) {
+            shared_rate_limit_wait(state, chat_id).await;
             bot.send_message(chat_id, format!("Error: failed to create workspace: {}", e))
                 .await?;
             return Ok(());
@@ -440,6 +462,7 @@ async fn handle_start_command(
         // Validate path exists
         let path = Path::new(&expanded);
         if !path.exists() || !path.is_dir() {
+            shared_rate_limit_wait(state, chat_id).await;
             bot.send_message(chat_id, format!("Error: '{}' is not a valid directory.", expanded))
                 .await?;
             return Ok(());
@@ -461,6 +484,7 @@ async fn handle_start_command(
             current_path: None,
             history: Vec::new(),
             pending_uploads: Vec::new(),
+            cleared: false,
         });
 
         if let Some((session_data, _)) = &existing {
@@ -509,7 +533,7 @@ async fn handle_start_command(
     }
 
     let response_text = response_lines.join("\n");
-    send_long_message(bot, chat_id, &response_text, None).await?;
+    send_long_message(bot, chat_id, &response_text, None, state).await?;
 
     Ok(())
 }
@@ -520,14 +544,34 @@ async fn handle_clear_command(
     chat_id: ChatId,
     state: &SharedState,
 ) -> ResponseResult<()> {
+    // Cancel in-progress AI request if any
+    let cancel_token = {
+        let data = state.lock().await;
+        data.cancel_tokens.get(&chat_id).cloned()
+    };
+    if let Some(token) = cancel_token {
+        token.cancelled.store(true, Ordering::Relaxed);
+        if let Ok(guard) = token.child_pid.lock() {
+            if let Some(pid) = *guard {
+                #[cfg(unix)]
+                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+            }
+        }
+    }
+
     {
         let mut data = state.lock().await;
         if let Some(session) = data.sessions.get_mut(&chat_id) {
             session.session_id = None;
             session.history.clear();
+            session.pending_uploads.clear();
+            session.cleared = true;
         }
+        data.cancel_tokens.remove(&chat_id);
+        data.stop_message_ids.remove(&chat_id);
     }
 
+    shared_rate_limit_wait(state, chat_id).await;
     bot.send_message(chat_id, "Session cleared.")
         .await?;
 
@@ -545,6 +589,7 @@ async fn handle_pwd_command(
         data.sessions.get(&chat_id).and_then(|s| s.current_path.clone())
     };
 
+    shared_rate_limit_wait(state, chat_id).await;
     match current_path {
         Some(path) => bot.send_message(chat_id, &path).await?,
         None => bot.send_message(chat_id, "No active session. Use /start <path> first.").await?,
@@ -572,6 +617,7 @@ async fn handle_stop_command(
             }
 
             // Send immediate feedback to user
+            shared_rate_limit_wait(state, chat_id).await;
             let stop_msg = bot.send_message(chat_id, "Stopping...").await?;
 
             // Store the stop message ID so the polling loop can update it later
@@ -598,6 +644,7 @@ async fn handle_stop_command(
             println!("  [{ts}] ■ Cancel signal sent");
         }
         None => {
+            shared_rate_limit_wait(state, chat_id).await;
             bot.send_message(chat_id, "No active request to stop.")
                 .await?;
         }
@@ -616,6 +663,7 @@ async fn handle_down_command(
     let file_path = text.strip_prefix("/down").unwrap_or("").trim();
 
     if file_path.is_empty() {
+        shared_rate_limit_wait(state, chat_id).await;
         bot.send_message(chat_id, "Usage: /down <filepath>\nExample: /down /home/kst/file.txt")
             .await?;
         return Ok(());
@@ -632,6 +680,7 @@ async fn handle_down_command(
         match current_path {
             Some(base) => format!("{}/{}", base.trim_end_matches('/'), file_path),
             None => {
+                shared_rate_limit_wait(state, chat_id).await;
                 bot.send_message(chat_id, "No active session. Use absolute path or /start <path> first.")
                     .await?;
                 return Ok(());
@@ -641,14 +690,17 @@ async fn handle_down_command(
 
     let path = Path::new(&resolved_path);
     if !path.exists() {
+        shared_rate_limit_wait(state, chat_id).await;
         bot.send_message(chat_id, &format!("File not found: {}", resolved_path)).await?;
         return Ok(());
     }
     if !path.is_file() {
+        shared_rate_limit_wait(state, chat_id).await;
         bot.send_message(chat_id, &format!("Not a file: {}", resolved_path)).await?;
         return Ok(());
     }
 
+    shared_rate_limit_wait(state, chat_id).await;
     bot.send_document(chat_id, teloxide::types::InputFile::file(path))
         .await?;
 
@@ -669,6 +721,7 @@ async fn handle_file_upload(
     };
 
     let Some(save_dir) = current_path else {
+        shared_rate_limit_wait(state, chat_id).await;
         bot.send_message(chat_id, "No active session. Use /start <path> first.")
             .await?;
         return Ok(());
@@ -691,17 +744,20 @@ async fn handle_file_upload(
     };
 
     // Download file from Telegram via HTTP
+    shared_rate_limit_wait(state, chat_id).await;
     let file = bot.get_file(&file_id).await?;
     let url = format!("https://api.telegram.org/file/bot{}/{}", bot.token(), file.path);
     let buf = match reqwest::get(&url).await {
         Ok(resp) => match resp.bytes().await {
             Ok(bytes) => bytes,
             Err(e) => {
+                shared_rate_limit_wait(state, chat_id).await;
                 bot.send_message(chat_id, &format!("Download failed: {}", e)).await?;
                 return Ok(());
             }
         },
         Err(e) => {
+            shared_rate_limit_wait(state, chat_id).await;
             bot.send_message(chat_id, &format!("Download failed: {}", e)).await?;
             return Ok(());
         }
@@ -716,9 +772,11 @@ async fn handle_file_upload(
     match fs::write(&dest, &buf) {
         Ok(_) => {
             let msg_text = format!("Saved: {}\n({} bytes)", dest.display(), file_size);
+            shared_rate_limit_wait(state, chat_id).await;
             bot.send_message(chat_id, &msg_text).await?;
         }
         Err(e) => {
+            shared_rate_limit_wait(state, chat_id).await;
             bot.send_message(chat_id, &format!("Failed to save file: {}", e)).await?;
             return Ok(());
         }
@@ -754,6 +812,7 @@ async fn handle_shell_command(
     let cmd_str = text.strip_prefix('!').unwrap_or("").trim();
 
     if cmd_str.is_empty() {
+        shared_rate_limit_wait(state, chat_id).await;
         bot.send_message(chat_id, "Usage: !<command>\nExample: !mkdir /home/kst/testcode")
             .await?;
         return Ok(());
@@ -816,7 +875,7 @@ async fn handle_shell_command(
         Err(e) => format!("Task error: {}", html_escape(&e.to_string())),
     };
 
-    send_long_message(bot, chat_id, &response, Some(ParseMode::Html)).await?;
+    send_long_message(bot, chat_id, &response, Some(ParseMode::Html), state).await?;
 
     Ok(())
 }
@@ -825,6 +884,7 @@ async fn handle_shell_command(
 async fn handle_availabletools_command(
     bot: &Bot,
     chat_id: ChatId,
+    state: &SharedState,
 ) -> ResponseResult<()> {
     let mut msg = String::from("<b>Available Tools</b>\n\n");
 
@@ -838,7 +898,7 @@ async fn handle_availabletools_command(
     }
     msg.push_str(&format!("\n{} = destructive\nTotal: {}", risk_badge(true), ALL_TOOLS.len()));
 
-    send_long_message(bot, chat_id, &msg, Some(ParseMode::Html)).await?;
+    send_long_message(bot, chat_id, &msg, Some(ParseMode::Html), state).await?;
 
     Ok(())
 }
@@ -866,6 +926,7 @@ async fn handle_allowedtools_command(
     }
     msg.push_str(&format!("\n{} = destructive\nTotal: {}", risk_badge(true), tools.len()));
 
+    shared_rate_limit_wait(state, chat_id).await;
     bot.send_message(chat_id, &msg)
         .parse_mode(ParseMode::Html)
         .await?;
@@ -886,6 +947,7 @@ async fn handle_allowed_command(
     let arg = text.strip_prefix("/allowed").unwrap_or("").trim();
 
     if arg.is_empty() {
+        shared_rate_limit_wait(state, chat_id).await;
         bot.send_message(chat_id, "Usage:\n/allowed +toolname — Add a tool\n/allowed -toolname — Remove a tool\n/allowedtools — Show current list")
             .await?;
         return Ok(());
@@ -902,12 +964,14 @@ async fn handle_allowed_command(
     } else if let Some(name) = arg.strip_prefix('-') {
         ('-', name.trim())
     } else {
+        shared_rate_limit_wait(state, chat_id).await;
         bot.send_message(chat_id, "Use +toolname to add or -toolname to remove.\nExample: /allowed +Bash")
             .await?;
         return Ok(());
     };
 
     if raw_name.is_empty() {
+        shared_rate_limit_wait(state, chat_id).await;
         bot.send_message(chat_id, "Tool name cannot be empty.")
             .await?;
         return Ok(());
@@ -941,6 +1005,7 @@ async fn handle_allowed_command(
         }
     };
 
+    shared_rate_limit_wait(state, chat_id).await;
     bot.send_message(chat_id, &response_msg)
         .parse_mode(ParseMode::Html)
         .await?;
@@ -966,7 +1031,10 @@ async fn handle_text_message(
         let tools = data.settings.allowed_tools.clone();
         // Drain pending uploads so they are sent to Claude exactly once
         let uploads = data.sessions.get_mut(&chat_id)
-            .map(|s| std::mem::take(&mut s.pending_uploads))
+            .map(|s| {
+                s.cleared = false; // Reset cleared flag on new message
+                std::mem::take(&mut s.pending_uploads)
+            })
             .unwrap_or_default();
         (info, tools, uploads)
     };
@@ -974,6 +1042,7 @@ async fn handle_text_message(
     let (session_id, current_path) = match session_info {
         Some(info) => info,
         None => {
+            shared_rate_limit_wait(state, chat_id).await;
             bot.send_message(chat_id, "No active session. Use /start <path> first.")
                 .await?;
             return Ok(());
@@ -984,7 +1053,8 @@ async fn handle_text_message(
     // It will be added together with the assistant response in the spawned task,
     // only on successful completion. On cancel, nothing is recorded.
 
-    // Send placeholder message
+    // Send placeholder message (update shared timestamp so spawned task knows)
+    shared_rate_limit_wait(state, chat_id).await;
     let placeholder = bot.send_message(chat_id, "...").await?;
     let placeholder_msg_id = placeholder.id;
 
@@ -1032,7 +1102,7 @@ async fn handle_text_message(
          IMPORTANT: The user is on Telegram and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
          All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
          Never use tools that expect user interaction. If you need clarification, just ask in plain text.{}",
-        current_path, chat_id.0, bot.token(), disabled_notice
+        current_path, chat_id.0, token_hash(bot.token()), disabled_notice
     );
 
     // Create cancel token for this request
@@ -1084,7 +1154,6 @@ async fn handle_text_message(
         let mut cancelled = false;
         let mut new_session_id: Option<String> = None;
         let mut spin_idx: usize = 0;
-        let mut last_edit_at = tokio::time::Instant::now();
 
         while !done {
             // Check cancel token
@@ -1093,9 +1162,7 @@ async fn handle_text_message(
                 break;
             }
 
-            // Send typing action (lasts ~5 seconds, so send periodically)
-            let _ = bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
-
+            // Sleep 3s as polling interval (without reserving a rate limit slot)
             tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
 
             // Check cancel token again after sleep
@@ -1181,6 +1248,8 @@ async fn handle_text_message(
             };
 
             if display_text != last_edit_text && !done {
+                // Rate limit: reserve slot right before the actual API call
+                shared_rate_limit_wait(&state_owned, chat_id).await;
                 let html_text = markdown_to_telegram_html(&display_text);
                 if let Err(e) = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_text)
                     .parse_mode(ParseMode::Html)
@@ -1189,8 +1258,11 @@ async fn handle_text_message(
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}]   ⚠ edit_message failed (streaming): {e}");
                 }
-                last_edit_at = tokio::time::Instant::now();
                 last_edit_text = display_text;
+            } else if !done {
+                // No new content to display, send typing indicator
+                shared_rate_limit_wait(&state_owned, chat_id).await;
+                let _ = bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
             }
         }
 
@@ -1223,12 +1295,8 @@ async fn handle_text_message(
                 format!("{}\n\n[Stopped]", normalized)
             };
 
-            // Ensure at least 3s since last streaming edit to avoid Telegram rate limit
-            let elapsed = last_edit_at.elapsed();
-            let min_gap = tokio::time::Duration::from_millis(3000);
-            if elapsed < min_gap {
-                tokio::time::sleep(min_gap - elapsed).await;
-            }
+            // Rate limit before final API call
+            shared_rate_limit_wait(&state_owned, chat_id).await;
 
             // Update placeholder message with partial response instead of deleting
             let html_stopped = markdown_to_telegram_html(&stopped_response);
@@ -1239,24 +1307,28 @@ async fn handle_text_message(
                 {
                     let ts_err = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts_err}]   ⚠ edit_message failed (stopped/HTML): {e}");
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
                     let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &stopped_response)
                         .await;
                 }
             } else {
-                let send_result = send_long_message(&bot_owned, chat_id, &html_stopped, Some(ParseMode::Html)).await;
+                let send_result = send_long_message(&bot_owned, chat_id, &html_stopped, Some(ParseMode::Html), &state_owned).await;
                 match send_result {
                     Ok(_) => {
+                        shared_rate_limit_wait(&state_owned, chat_id).await;
                         let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
                     }
                     Err(e) => {
                         let ts_err = chrono::Local::now().format("%H:%M:%S");
                         println!("  [{ts_err}]   ⚠ send_long_message failed (stopped/HTML): {e}");
-                        let fallback = send_long_message(&bot_owned, chat_id, &stopped_response, None).await;
+                        let fallback = send_long_message(&bot_owned, chat_id, &stopped_response, None, &state_owned).await;
                         match fallback {
                             Ok(_) => {
+                                shared_rate_limit_wait(&state_owned, chat_id).await;
                                 let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
                             }
                             Err(_) => {
+                                shared_rate_limit_wait(&state_owned, chat_id).await;
                                 let truncated = truncate_str(&stopped_response, TELEGRAM_MSG_LIMIT);
                                 let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated)
                                     .await;
@@ -1268,6 +1340,7 @@ async fn handle_text_message(
 
             // Delete the "Stopping..." message (no longer needed)
             if let Some(msg_id) = stop_msg_id {
+                shared_rate_limit_wait(&state_owned, chat_id).await;
                 let _ = bot_owned.delete_message(chat_id, msg_id).await;
             }
 
@@ -1276,32 +1349,33 @@ async fn handle_text_message(
 
             // Record user message + stopped response in history
             // (Claude's session context already has this interaction)
+            // Skip if session was cleared while we were running (race with /clear)
             let mut data = state_owned.lock().await;
             if let Some(session) = data.sessions.get_mut(&chat_id) {
-                if let Some(sid) = new_session_id {
-                    session.session_id = Some(sid);
-                }
-                session.history.push(HistoryItem {
-                    item_type: HistoryType::User,
-                    content: user_text_owned,
-                });
-                session.history.push(HistoryItem {
-                    item_type: HistoryType::Assistant,
-                    content: stopped_response,
-                });
+                if session.cleared {
+                    // Session was cleared by /clear; do not re-populate
+                } else {
+                    if let Some(sid) = new_session_id {
+                        session.session_id = Some(sid);
+                    }
+                    session.history.push(HistoryItem {
+                        item_type: HistoryType::User,
+                        content: user_text_owned,
+                    });
+                    session.history.push(HistoryItem {
+                        item_type: HistoryType::Assistant,
+                        content: stopped_response,
+                    });
 
-                save_session_to_file(session, &current_path);
+                    save_session_to_file(session, &current_path);
+                }
             }
 
             return;
         }
 
-        // Ensure at least 3s since last streaming edit to avoid Telegram rate limit
-        let elapsed = last_edit_at.elapsed();
-        let min_gap = tokio::time::Duration::from_millis(3000);
-        if elapsed < min_gap {
-            tokio::time::sleep(min_gap - elapsed).await;
-        }
+        // Rate limit before final API call
+        shared_rate_limit_wait(&state_owned, chat_id).await;
 
         // Final response
         if full_response.is_empty() {
@@ -1320,6 +1394,7 @@ async fn handle_text_message(
                 let ts = chrono::Local::now().format("%H:%M:%S");
                 println!("  [{ts}]   ⚠ edit_message failed (HTML): {e}");
                 // Fallback: try plain text without HTML parse mode
+                shared_rate_limit_wait(&state_owned, chat_id).await;
                 let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &full_response)
                     .await;
             }
@@ -1327,24 +1402,27 @@ async fn handle_text_message(
             // For long responses: send new messages FIRST, then delete placeholder.
             // This prevents the scenario where placeholder is deleted but send fails,
             // leaving the user with no response at all.
-            let send_result = send_long_message(&bot_owned, chat_id, &html_response, Some(ParseMode::Html)).await;
+            let send_result = send_long_message(&bot_owned, chat_id, &html_response, Some(ParseMode::Html), &state_owned).await;
             match send_result {
                 Ok(_) => {
                     // New messages sent successfully, now safe to delete placeholder
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
                     let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
                 }
                 Err(e) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}]   ⚠ send_long_message failed (HTML): {e}");
                     // Fallback: try plain text
-                    let fallback_result = send_long_message(&bot_owned, chat_id, &full_response, None).await;
+                    let fallback_result = send_long_message(&bot_owned, chat_id, &full_response, None, &state_owned).await;
                     match fallback_result {
                         Ok(_) => {
+                            shared_rate_limit_wait(&state_owned, chat_id).await;
                             let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
                         }
                         Err(e2) => {
                             println!("  [{ts}]   ⚠ send_long_message failed (plain): {e2}");
                             // Last resort: edit placeholder with truncated plain text
+                            shared_rate_limit_wait(&state_owned, chat_id).await;
                             let truncated = truncate_str(&full_response, TELEGRAM_MSG_LIMIT);
                             let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated)
                                 .await;
@@ -1356,26 +1434,32 @@ async fn handle_text_message(
 
         // Clean up leftover "Stopping..." message if /stop raced with normal completion
         if let Some(msg_id) = stop_msg_id {
+            shared_rate_limit_wait(&state_owned, chat_id).await;
             let _ = bot_owned.delete_message(chat_id, msg_id).await;
         }
 
         // Update session state: push user message + assistant response together
+        // Skip if session was cleared while we were running (race with /clear)
         {
             let mut data = state_owned.lock().await;
             if let Some(session) = data.sessions.get_mut(&chat_id) {
-                if let Some(sid) = new_session_id {
-                    session.session_id = Some(sid);
-                }
-                session.history.push(HistoryItem {
-                    item_type: HistoryType::User,
-                    content: user_text_owned,
-                });
-                session.history.push(HistoryItem {
-                    item_type: HistoryType::Assistant,
-                    content: full_response,
-                });
+                if session.cleared {
+                    // Session was cleared by /clear; do not re-populate
+                } else {
+                    if let Some(sid) = new_session_id {
+                        session.session_id = Some(sid);
+                    }
+                    session.history.push(HistoryItem {
+                        item_type: HistoryType::User,
+                        content: user_text_owned,
+                    });
+                    session.history.push(HistoryItem {
+                        item_type: HistoryType::Assistant,
+                        content: full_response,
+                    });
 
-                save_session_to_file(session, &current_path);
+                    save_session_to_file(session, &current_path);
+                }
             }
         }
 
@@ -1486,6 +1570,26 @@ fn floor_char_boundary(s: &str, index: usize) -> usize {
     }
 }
 
+/// Shared per-chat rate limiter using reservation pattern.
+/// Acquires the lock briefly to calculate and reserve the next API call slot,
+/// then releases the lock and sleeps until the reserved time.
+/// This ensures that even concurrent tasks for the same chat maintain 3s gaps.
+async fn shared_rate_limit_wait(state: &SharedState, chat_id: ChatId) {
+    let min_gap = tokio::time::Duration::from_millis(3000);
+    let sleep_until = {
+        let mut data = state.lock().await;
+        let last = data.api_timestamps.entry(chat_id).or_insert_with(||
+            tokio::time::Instant::now() - tokio::time::Duration::from_secs(10)
+        );
+        let earliest_next = *last + min_gap;
+        let now = tokio::time::Instant::now();
+        let target = if earliest_next > now { earliest_next } else { now };
+        *last = target; // Reserve this slot
+        target
+    }; // Mutex released here
+    tokio::time::sleep_until(sleep_until).await;
+}
+
 /// Send a message that may exceed Telegram's 4096 character limit
 /// by splitting it into multiple messages, handling UTF-8 boundaries
 /// and unclosed HTML tags (e.g. <pre>) across split points
@@ -1494,8 +1598,10 @@ async fn send_long_message(
     chat_id: ChatId,
     text: &str,
     parse_mode: Option<ParseMode>,
+    state: &SharedState,
 ) -> ResponseResult<()> {
     if text.len() <= TELEGRAM_MSG_LIMIT {
+        shared_rate_limit_wait(state, chat_id).await;
         let mut req = bot.send_message(chat_id, text);
         if let Some(mode) = parse_mode {
             req = req.parse_mode(mode);
@@ -1520,6 +1626,7 @@ async fn send_long_message(
             }
             chunk.push_str(remaining);
 
+            shared_rate_limit_wait(state, chat_id).await;
             let mut req = bot.send_message(chat_id, &chunk);
             if let Some(mode) = parse_mode {
                 req = req.parse_mode(mode);
@@ -1557,6 +1664,7 @@ async fn send_long_message(
             }
         }
 
+        shared_rate_limit_wait(state, chat_id).await;
         let mut req = bot.send_message(chat_id, &chunk);
         if let Some(mode) = parse_mode {
             req = req.parse_mode(mode);
