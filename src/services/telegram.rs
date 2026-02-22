@@ -2115,7 +2115,7 @@ fn find_closing_single(chars: &[char], start: usize, marker: char) -> Option<usi
 }
 
 /// Format tool input JSON into a human-readable summary
-fn format_tool_input(name: &str, input: &str) -> String {
+pub fn format_tool_input(name: &str, input: &str) -> String {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(input) else {
         return format!("{} {}", name, truncate_str(input, 200));
     };

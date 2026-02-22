@@ -43,6 +43,9 @@ fn print_help() {
     println!("    --ccserver <TOKEN>...   Start Telegram bot server(s)");
     println!("    --sendfile <PATH> --chat <ID> --key <HASH>");
     println!("                            Send file via Telegram bot (internal use, HASH = token hash)");
+    println!("    --dcserver <TOKEN>      Start Discord bot server");
+    println!("    --discord-sendfile <PATH> --channel <ID> --key <HASH>");
+    println!("                            Send file via Discord bot (internal use, HASH = token hash)");
     println!();
     println!("HOMEPAGE: https://cokacdir.cokac.com");
 }
@@ -96,6 +99,42 @@ fn handle_sendfile(path: &str, chat_id: i64, hash_key: &str) {
 
 fn print_version() {
     println!("cokacdir {}", VERSION);
+}
+
+fn handle_dcserver(token: String) {
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+
+    let title = format!("  cokacdir v{}  |  Discord Bot Server  ", VERSION);
+    let width = title.chars().count();
+    println!();
+    println!("  ┌{}┐", "─".repeat(width));
+    println!("  │{}│", title);
+    println!("  └{}┘", "─".repeat(width));
+    println!();
+    println!("  ▸ Status : Connecting...");
+    println!();
+    rt.block_on(services::discord::run_bot(&token));
+}
+
+fn handle_discord_sendfile(path: &str, channel_id: u64, hash_key: &str) {
+    use crate::services::discord::resolve_discord_token_by_hash;
+    let token = match resolve_discord_token_by_hash(hash_key) {
+        Some(t) => t,
+        None => {
+            eprintln!("Error: no Discord bot token found for hash key: {}", hash_key);
+            std::process::exit(1);
+        }
+    };
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+    rt.block_on(async {
+        match services::discord::send_file_to_channel(&token, channel_id, path).await {
+            Ok(_) => println!("File sent: {}", path),
+            Err(e) => {
+                eprintln!("Failed to send file: {}", e);
+                std::process::exit(1);
+            }
+        }
+    });
 }
 
 fn handle_ccserver(tokens: Vec<String>) {
@@ -249,6 +288,58 @@ fn main() -> io::Result<()> {
                     return Ok(());
                 }
                 handle_ccserver(tokens);
+                return Ok(());
+            }
+            "--dcserver" => {
+                if i + 1 >= args.len() {
+                    eprintln!("Error: --dcserver requires a token argument");
+                    eprintln!("Usage: cokacdir --dcserver <TOKEN>");
+                    return Ok(());
+                }
+                let token = args[i + 1].clone();
+                handle_dcserver(token);
+                return Ok(());
+            }
+            "--discord-sendfile" => {
+                // Parse: --discord-sendfile <PATH> --channel <ID> --key <HASH>
+                let mut file_path: Option<String> = None;
+                let mut channel_id: Option<u64> = None;
+                let mut key: Option<String> = None;
+                let mut j = i + 1;
+                while j < args.len() {
+                    match args[j].as_str() {
+                        "--channel" => {
+                            if j + 1 < args.len() {
+                                channel_id = args[j + 1].parse().ok();
+                                j += 2;
+                            } else {
+                                j += 1;
+                            }
+                        }
+                        "--key" => {
+                            if j + 1 < args.len() {
+                                key = Some(args[j + 1].clone());
+                                j += 2;
+                            } else {
+                                j += 1;
+                            }
+                        }
+                        _ if file_path.is_none() && !args[j].starts_with("--") => {
+                            file_path = Some(args[j].clone());
+                            j += 1;
+                        }
+                        _ => { j += 1; }
+                    }
+                }
+                match (file_path, channel_id, key) {
+                    (Some(fp), Some(cid), Some(k)) => {
+                        handle_discord_sendfile(&fp, cid, &k);
+                    }
+                    _ => {
+                        eprintln!("Error: --discord-sendfile requires <PATH>, --channel <ID>, and --key <HASH>");
+                        eprintln!("Usage: cokacdir --discord-sendfile <PATH> --channel <ID> --key <HASH>");
+                    }
+                }
                 return Ok(());
             }
             "--sendfile" => {

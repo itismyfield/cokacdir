@@ -5,3 +5,4 @@ pub mod remote;
 pub mod remote_transfer;
 pub mod dedup;
 pub mod telegram;
+pub mod discord;
