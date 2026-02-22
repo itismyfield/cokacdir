@@ -1075,7 +1075,7 @@ AI can read, edit, and run commands in your session.
 async fn autocomplete_skill<'a>(
     ctx: Context<'a>,
     partial: &'a str,
-) -> Vec<poise::AutocompleteChoice<String>> {
+) -> Vec<serenity::AutocompleteChoice> {
     let data = ctx.data().shared.lock().await;
     let partial_lower = partial.to_lowercase();
     data.skills_cache
@@ -1086,10 +1086,7 @@ async fn autocomplete_skill<'a>(
         .take(25) // Discord autocomplete limit
         .map(|(name, desc)| {
             let label = format!("{} — {}", name, truncate_str(desc, 60));
-            poise::AutocompleteChoice {
-                name: label,
-                value: name.clone(),
-            }
+            serenity::AutocompleteChoice::new(label, name.clone())
         })
         .collect()
 }
