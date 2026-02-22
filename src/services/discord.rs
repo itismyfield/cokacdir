@@ -65,6 +65,8 @@ struct SharedData {
     cancel_tokens: HashMap<ChannelId, Arc<CancelToken>>,
     /// Per-channel timestamps of the last Discord API call (for rate limiting)
     api_timestamps: HashMap<ChannelId, tokio::time::Instant>,
+    /// Cached skill list: (name, description)
+    skills_cache: Vec<(String, String)>,
 }
 
 /// Poise user data type
@@ -215,6 +217,62 @@ fn risk_badge(destructive: bool) -> &'static str {
     if destructive { "⚠️" } else { "" }
 }
 
+/// Scan for available Claude Code skills (slash commands).
+/// Searches: ~/.claude/commands/ and <project>/.claude/commands/
+fn scan_skills(project_path: Option<&str>) -> Vec<(String, String)> {
+    let mut skills: Vec<(String, String)> = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+
+    let mut dirs_to_scan: Vec<std::path::PathBuf> = Vec::new();
+
+    // Global skills: ~/.claude/commands/
+    if let Some(home) = dirs::home_dir() {
+        dirs_to_scan.push(home.join(".claude").join("commands"));
+    }
+
+    // Project-level skills: <project>/.claude/commands/
+    if let Some(proj) = project_path {
+        dirs_to_scan.push(Path::new(proj).join(".claude").join("commands"));
+    }
+
+    for dir in dirs_to_scan {
+        if !dir.is_dir() {
+            continue;
+        }
+        let Ok(entries) = fs::read_dir(&dir) else { continue };
+        for entry in entries.filter_map(|e| e.ok()) {
+            let path = entry.path();
+            if path.extension().map(|e| e == "md").unwrap_or(false) {
+                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                    let name = stem.to_string();
+                    if seen.insert(name.clone()) {
+                        // Read first line as description
+                        let desc = fs::read_to_string(&path)
+                            .ok()
+                            .and_then(|content| {
+                                content.lines()
+                                    .find(|l| {
+                                        let t = l.trim().trim_start_matches('#').trim();
+                                        !t.is_empty()
+                                    })
+                                    .map(|l| {
+                                        let t = l.trim().trim_start_matches('#').trim();
+                                        let truncated: String = t.chars().take(80).collect();
+                                        truncated
+                                    })
+                            })
+                            .unwrap_or_else(|| format!("Skill: {}", name));
+                        skills.push((name, desc));
+                    }
+                }
+            }
+        }
+    }
+
+    skills.sort_by(|a, b| a.0.cmp(&b.0));
+    skills
+}
+
 /// Entry point: start the Discord bot
 pub async fn run_bot(token: &str) {
     let bot_settings = load_bot_settings(token);
@@ -224,11 +282,16 @@ pub async fn run_bot(token: &str) {
         None => println!("  ⚠ No owner registered — first user will be registered as owner"),
     }
 
+    let initial_skills = scan_skills(None);
+    let skill_count = initial_skills.len();
+    println!("  ✓ Skills loaded: {skill_count}");
+
     let shared = Arc::new(Mutex::new(SharedData {
         sessions: HashMap::new(),
         settings: bot_settings,
         cancel_tokens: HashMap::new(),
         api_timestamps: HashMap::new(),
+        skills_cache: initial_skills,
     }));
 
     let token_owned = token.to_string();
@@ -243,6 +306,7 @@ pub async fn run_bot(token: &str) {
                 cmd_stop(),
                 cmd_down(),
                 cmd_shell(),
+                cmd_cc(),
                 cmd_allowedtools(),
                 cmd_allowed(),
                 cmd_adduser(),
@@ -994,6 +1058,9 @@ AI can read, edit, and run commands in your session.
 `/allowed +name` — Add tool (e.g. `/allowed +Bash`)
 `/allowed -name` — Remove tool
 
+**Skills**
+`/cc <skill>` — Run a Claude Code skill (autocomplete)
+
 **User Management** (owner only)
 `/adduser @user` — Allow a user to use the bot
 `/removeuser @user` — Remove a user's access
@@ -1001,6 +1068,118 @@ AI can read, edit, and run commands in your session.
 `/help` — Show this help";
 
     ctx.say(help).await?;
+    Ok(())
+}
+
+/// Autocomplete handler for /cc skill names
+async fn autocomplete_skill<'a>(
+    ctx: Context<'a>,
+    partial: &'a str,
+) -> Vec<poise::AutocompleteChoice<String>> {
+    let data = ctx.data().shared.lock().await;
+    let partial_lower = partial.to_lowercase();
+    data.skills_cache
+        .iter()
+        .filter(|(name, _)| {
+            partial.is_empty() || name.to_lowercase().contains(&partial_lower)
+        })
+        .take(25) // Discord autocomplete limit
+        .map(|(name, desc)| {
+            let label = format!("{} — {}", name, truncate_str(desc, 60));
+            poise::AutocompleteChoice {
+                name: label,
+                value: name.clone(),
+            }
+        })
+        .collect()
+}
+
+/// /cc <skill> [args] — Run a Claude Code skill
+#[poise::command(slash_command, rename = "cc")]
+async fn cmd_cc(
+    ctx: Context<'_>,
+    #[description = "Skill name"]
+    #[autocomplete = "autocomplete_skill"]
+    skill: String,
+    #[description = "Additional arguments for the skill"] args: Option<String>,
+) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    let args_str = args.as_deref().unwrap_or("");
+    println!("  [{ts}] ◀ [{user_name}] /cc {skill} {args_str}");
+
+    // Verify skill exists
+    let skill_exists = {
+        let data = ctx.data().shared.lock().await;
+        data.skills_cache.iter().any(|(name, _)| name == &skill)
+    };
+
+    if !skill_exists {
+        ctx.say(format!("Unknown skill: `{}`. Use `/cc` to see available skills.", skill)).await?;
+        return Ok(());
+    }
+
+    // Auto-restore session
+    auto_restore_session(&ctx.data().shared, ctx.channel_id()).await;
+
+    // Check session exists
+    let has_session = {
+        let data = ctx.data().shared.lock().await;
+        data.sessions.get(&ctx.channel_id())
+            .and_then(|s| s.current_path.as_ref())
+            .is_some()
+    };
+
+    if !has_session {
+        ctx.say("No active session. Use `/start <path>` first.").await?;
+        return Ok(());
+    }
+
+    // Block if AI is in progress
+    {
+        let d = ctx.data().shared.lock().await;
+        if d.cancel_tokens.contains_key(&ctx.channel_id()) {
+            drop(d);
+            ctx.say("AI request in progress. Use `/stop` to cancel.").await?;
+            return Ok(());
+        }
+    }
+
+    // Build the prompt that tells Claude to invoke the skill
+    let skill_prompt = if args_str.is_empty() {
+        format!(
+            "Execute the skill `/{skill}` now. \
+             Use the Skill tool with skill=\"{skill}\"."
+        )
+    } else {
+        format!(
+            "Execute the skill `/{skill}` with arguments: {args_str}\n\
+             Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\"."
+        )
+    };
+
+    // Send a confirmation message that we can use as the "user message" for reactions
+    ctx.defer().await?;
+    let confirm = ctx.channel_id().send_message(
+        ctx.serenity_context(),
+        CreateMessage::new().content(format!("⚡ Running skill: `/{skill}`")),
+    ).await?;
+
+    // Hand off to the text message handler (it creates its own placeholder)
+    handle_text_message(
+        ctx.serenity_context(),
+        ctx.channel_id(),
+        confirm.id,
+        &skill_prompt,
+        &ctx.data().shared,
+        &ctx.data().token,
+    ).await?;
+
     Ok(())
 }
 
@@ -1082,6 +1261,22 @@ async fn handle_text_message(
         )
     };
 
+    // Build skills notice for system prompt
+    let skills_notice = {
+        let data = shared.lock().await;
+        if data.skills_cache.is_empty() {
+            String::new()
+        } else {
+            let list: Vec<String> = data.skills_cache.iter()
+                .map(|(name, desc)| format!("  - /{}: {}", name, desc))
+                .collect();
+            format!(
+                "\n\nAvailable skills (invoke via the Skill tool):\n{}",
+                list.join("\n")
+            )
+        }
+    };
+
     // Build system prompt
     let system_prompt_owned = format!(
         "You are chatting with a user through Discord.\n\
@@ -1096,8 +1291,8 @@ async fn handle_text_message(
          The user cannot see your tool calls, so narrate your progress so they know what is happening.\n\n\
          IMPORTANT: The user is on Discord and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
          All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
-         Never use tools that expect user interaction. If you need clarification, just ask in plain text.{}",
-        current_path, channel_id.get(), discord_token_hash(token), disabled_notice
+         Never use tools that expect user interaction. If you need clarification, just ask in plain text.{}{}",
+        current_path, channel_id.get(), discord_token_hash(token), disabled_notice, skills_notice
     );
 
     // Create cancel token
