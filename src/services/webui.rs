@@ -43,6 +43,39 @@ pub fn push_status_by_session(session_id: &str, status: &str) {
     }
 }
 
+/// Push statusline info (model, cost, tokens) to all WebSocket clients.
+pub fn push_statusline_by_session(
+    session_id: &str,
+    model: Option<&str>,
+    cost_usd: Option<f64>,
+    total_cost_usd: Option<f64>,
+    duration_ms: Option<u64>,
+    num_turns: Option<u32>,
+) {
+    let (Some(tx), Some(agents)) = (WEBUI_TX.get(), WEBUI_AGENTS.get()) else {
+        return;
+    };
+    let agent_id = {
+        let Ok(map) = agents.try_lock() else { return };
+        match map.get(session_id) {
+            Some(agent) => agent.id,
+            None => return,
+        }
+    };
+    let msg = serde_json::json!({
+        "type": "agentStatusline",
+        "id": agent_id,
+        "model": model,
+        "costUsd": cost_usd,
+        "totalCostUsd": total_cost_usd,
+        "durationMs": duration_ms,
+        "numTurns": num_turns,
+    });
+    if let Ok(json) = serde_json::to_string(&msg) {
+        let _ = tx.send(json);
+    }
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 /// Lightweight snapshot of a Claude Code session for the web UI

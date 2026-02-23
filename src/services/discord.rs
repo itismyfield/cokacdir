@@ -1512,6 +1512,19 @@ async fn handle_text_message(
                                 full_response = format!("Error: {}", message);
                                 done = true;
                             }
+                            StreamMessage::StatusUpdate { model, cost_usd, total_cost_usd, duration_ms, num_turns } => {
+                                // Push statusline info to web UI
+                                if let Some(ref sid) = session_id_for_status {
+                                    crate::services::webui::push_statusline_by_session(
+                                        sid,
+                                        model.as_deref(),
+                                        cost_usd,
+                                        total_cost_usd,
+                                        duration_ms,
+                                        num_turns,
+                                    );
+                                }
+                            }
                         }
                     }
                     Err(std::sync::mpsc::TryRecvError::Empty) => break,

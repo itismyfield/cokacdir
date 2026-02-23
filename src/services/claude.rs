@@ -92,6 +92,14 @@ pub enum StreamMessage {
     Done { result: String, session_id: Option<String> },
     /// Error
     Error { message: String, stdout: String, stderr: String, exit_code: Option<i32> },
+    /// Statusline info extracted from result/assistant events
+    StatusUpdate {
+        model: Option<String>,
+        cost_usd: Option<f64>,
+        total_cost_usd: Option<f64>,
+        duration_ms: Option<u64>,
+        num_turns: Option<u32>,
+    },
 }
 
 /// Token for cooperative cancellation of streaming requests.
@@ -468,6 +476,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log("BufReader created, ready to read lines...");
 
     let mut last_session_id: Option<String> = None;
+    let mut last_model: Option<String> = None;
     let mut final_result: Option<String> = None;
     let mut stdout_error: Option<(String, String)> = None; // (message, raw_line)
     let mut line_count = 0;
@@ -521,6 +530,27 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 if let Some(content) = json.get("message").and_then(|m| m.get("content")) {
                     debug_log(&format!("  Assistant content array: {}", content));
                 }
+                // Extract model name from assistant messages
+                if let Some(model) = json.get("message").and_then(|m| m.get("model")).and_then(|v| v.as_str()) {
+                    last_model = Some(model.to_string());
+                }
+            }
+
+            // Extract statusline info from result events
+            if msg_type == "result" {
+                let cost_usd = json.get("cost_usd").and_then(|v| v.as_f64());
+                let total_cost_usd = json.get("total_cost_usd").and_then(|v| v.as_f64());
+                let duration_ms = json.get("duration_ms").and_then(|v| v.as_u64());
+                let num_turns = json.get("num_turns").and_then(|v| v.as_u64()).map(|v| v as u32);
+                if cost_usd.is_some() || total_cost_usd.is_some() || last_model.is_some() {
+                    let _ = sender.send(StreamMessage::StatusUpdate {
+                        model: last_model.clone(),
+                        cost_usd,
+                        total_cost_usd,
+                        duration_ms,
+                        num_turns,
+                    });
+                }
             }
 
             debug_log("  Calling parse_stream_message...");
@@ -562,6 +592,9 @@ IMPORTANT: Format your responses using Markdown for better readability:
                     }
                     StreamMessage::TaskNotification { task_id, status, summary } => {
                         debug_log(&format!("  >>> TaskNotification: task_id={}, status={}, summary={}", task_id, status, summary));
+                    }
+                    StreamMessage::StatusUpdate { ref model, cost_usd, total_cost_usd, .. } => {
+                        debug_log(&format!("  >>> StatusUpdate: model={:?}, cost={:?}, total_cost={:?}", model, cost_usd, total_cost_usd));
                     }
                 }
 

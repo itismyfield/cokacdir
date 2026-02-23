@@ -122,7 +122,7 @@ function App() {
 
   const isEditDirty = useCallback(() => editor.isEditMode && editor.isDirty, [editor.isEditMode, editor.isDirty])
 
-  const { agents, selectedAgent, agentTools, agentStatuses, agentNames, subagentTools, subagentCharacters, layoutReady, loadedAssets } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
+  const { agents, selectedAgent, agentTools, agentStatuses, agentNames, agentStatuslines, subagentTools, subagentCharacters, layoutReady, loadedAssets } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
 
   // Sync agent display names to the canvas renderer
   useEffect(() => {
@@ -314,6 +314,46 @@ function App() {
           subagentTools={subagentTools}
           onSelectAgent={handleSelectAgent}
         />
+      )}
+
+      {/* Statusline bar */}
+      {Object.keys(agentStatuslines).length > 0 && (
+        <div
+          style={{
+            position: 'absolute',
+            bottom: 40,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 50,
+            display: 'flex',
+            gap: 16,
+            alignItems: 'center',
+            background: 'rgba(0, 0, 0, 0.75)',
+            color: '#ccc',
+            fontSize: '11px',
+            fontFamily: 'monospace',
+            padding: '3px 12px',
+            borderRadius: 2,
+            whiteSpace: 'nowrap',
+            pointerEvents: 'none',
+          }}
+        >
+          {(() => {
+            const entries = Object.values(agentStatuslines)
+            const model = entries.find((e) => e.model)?.model
+            const totalCost = entries.reduce((sum, e) => sum + (e.totalCostUsd ?? 0), 0)
+            const totalTurns = entries.reduce((sum, e) => sum + (e.numTurns ?? 0), 0)
+            const activeCount = Object.values(agentStatuses).filter((s) => s !== 'waiting').length
+            return (
+              <>
+                {model && <span style={{ color: '#8be9fd' }}>{model}</span>}
+                {totalCost > 0 && <span style={{ color: '#50fa7b' }}>${totalCost.toFixed(4)}</span>}
+                {totalTurns > 0 && <span>{totalTurns} turns</span>}
+                <span>{agents.length} agent{agents.length !== 1 ? 's' : ''}{activeCount > 0 ? ` (${activeCount} active)` : ''}</span>
+              </>
+            )
+          })()}
+        </div>
       )}
     </div>
   )

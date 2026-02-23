@@ -1026,6 +1026,9 @@ Keep responses concise and terminal-friendly.",
                     processing_done = true;
                     has_new_content = true;
                 }
+                StreamMessage::StatusUpdate { .. } => {
+                    // Ignored in TUI (only used for webui statusline)
+                }
             }
 
             // Auto scroll while processing

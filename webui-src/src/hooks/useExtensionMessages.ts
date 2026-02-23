@@ -38,12 +38,21 @@ export interface FurnitureAsset {
   backgroundTiles?: number
 }
 
+export interface AgentStatusline {
+  model?: string
+  costUsd?: number
+  totalCostUsd?: number
+  durationMs?: number
+  numTurns?: number
+}
+
 export interface ExtensionMessageState {
   agents: number[]
   selectedAgent: number | null
   agentTools: Record<number, ToolActivity[]>
   agentStatuses: Record<number, string>
   agentNames: Record<number, string>
+  agentStatuslines: Record<number, AgentStatusline>
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
   layoutReady: boolean
@@ -72,6 +81,7 @@ export function useExtensionMessages(
   const [subagentTools, setSubagentTools] = useState<Record<number, Record<string, ToolActivity[]>>>({})
   const [subagentCharacters, setSubagentCharacters] = useState<SubagentCharacter[]>([])
   const [layoutReady, setLayoutReady] = useState(false)
+  const [agentStatuslines, setAgentStatuslines] = useState<Record<number, AgentStatusline>>({})
   const [loadedAssets, setLoadedAssets] = useState<{ catalog: FurnitureAsset[]; sprites: Record<string, string[][]> } | undefined>()
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
@@ -411,6 +421,18 @@ export function useExtensionMessages(
       } else if (msg.type === 'settingsLoaded') {
         const soundOn = msg.soundEnabled as boolean
         setSoundEnabled(soundOn)
+      } else if (msg.type === 'agentStatusline') {
+        const id = msg.id as number
+        setAgentStatuslines((prev) => ({
+          ...prev,
+          [id]: {
+            model: msg.model as string | undefined,
+            costUsd: msg.costUsd as number | undefined,
+            totalCostUsd: msg.totalCostUsd as number | undefined,
+            durationMs: msg.durationMs as number | undefined,
+            numTurns: msg.numTurns as number | undefined,
+          },
+        }))
       } else if (msg.type === 'furnitureAssetsLoaded') {
         try {
           const catalog = msg.catalog as FurnitureAsset[]
@@ -437,5 +459,5 @@ export function useExtensionMessages(
     return () => window.removeEventListener('message', handler)
   }, [getOfficeState])
 
-  return { agents, selectedAgent, agentTools, agentStatuses, agentNames, subagentTools, subagentCharacters, layoutReady, loadedAssets }
+  return { agents, selectedAgent, agentTools, agentStatuses, agentNames, agentStatuslines, subagentTools, subagentCharacters, layoutReady, loadedAssets }
 }

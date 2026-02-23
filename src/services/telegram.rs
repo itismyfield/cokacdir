@@ -1845,6 +1845,9 @@ async fn handle_text_message(
                                     );
                                     done = true;
                                 }
+                                StreamMessage::StatusUpdate { .. } => {
+                                    // Ignored in telegram (only used for webui statusline)
+                                }
                             }
                         }
                         Err(std::sync::mpsc::TryRecvError::Empty) => break,
