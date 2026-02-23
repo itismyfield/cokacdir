@@ -1423,7 +1423,7 @@ async fn handle_text_message(
         );
 
         if let Err(e) = result {
-            let _ = tx.send(StreamMessage::Error { message: e });
+            let _ = tx.send(StreamMessage::Error { message: e, stdout: String::new(), stderr: String::new(), exit_code: None });
         }
     });
 
@@ -1508,7 +1508,7 @@ async fn handle_text_message(
                                 }
                                 done = true;
                             }
-                            StreamMessage::Error { message } => {
+                            StreamMessage::Error { message, .. } => {
                                 full_response = format!("Error: {}", message);
                                 done = true;
                             }
