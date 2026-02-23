@@ -1,7 +1,8 @@
-import { useState, useCallback, useRef } from 'react'
+import { useState, useCallback, useRef, useEffect } from 'react'
 import { OfficeState } from './office/engine/officeState.js'
 import { OfficeCanvas } from './office/components/OfficeCanvas.js'
 import { ToolOverlay } from './office/components/ToolOverlay.js'
+import { setAgentDisplayName } from './office/engine/renderer.js'
 import { EditorToolbar } from './office/editor/EditorToolbar.js'
 import { EditorState } from './office/editor/editorState.js'
 import { EditTool } from './office/types.js'
@@ -121,7 +122,14 @@ function App() {
 
   const isEditDirty = useCallback(() => editor.isEditMode && editor.isDirty, [editor.isEditMode, editor.isDirty])
 
-  const { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
+  const { agents, selectedAgent, agentTools, agentStatuses, agentNames, subagentTools, subagentCharacters, layoutReady, loadedAssets } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
+
+  // Sync agent display names to the canvas renderer
+  useEffect(() => {
+    for (const [idStr, name] of Object.entries(agentNames)) {
+      setAgentDisplayName(Number(idStr), name)
+    }
+  }, [agentNames])
 
   const [isDebugMode, setIsDebugMode] = useState(false)
 
@@ -288,6 +296,8 @@ function App() {
         officeState={officeState}
         agents={agents}
         agentTools={agentTools}
+        agentStatuses={agentStatuses}
+        agentNames={agentNames}
         subagentCharacters={subagentCharacters}
         containerRef={containerRef}
         zoom={editor.zoom}

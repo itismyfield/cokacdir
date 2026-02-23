@@ -46,6 +46,7 @@ export function createCharacter(
   seatId: string | null,
   seat: Seat | null,
   hueShift = 0,
+  skinName?: string,
 ): Character {
   const col = seat ? seat.seatCol : 1
   const row = seat ? seat.seatRow : 1
@@ -78,6 +79,7 @@ export function createCharacter(
     matrixEffect: null,
     matrixEffectTimer: 0,
     matrixEffectSeeds: [],
+    skinName,
   }
 }
 
@@ -88,6 +90,7 @@ export function updateCharacter(
   seats: Map<string, Seat>,
   tileMap: TileTypeVal[][],
   blockedTiles: Set<string>,
+  roomWalkableTiles?: Array<{ col: number; row: number }>,
 ): void {
   ch.frameTimer += dt
 
@@ -115,8 +118,11 @@ export function updateCharacter(
     }
 
     case CharacterState.IDLE: {
-      // No idle animation — static pose
-      ch.frame = 0
+      // Idle animation: gentle bounce (6 frames at walk frame rate)
+      if (ch.frameTimer >= WALK_FRAME_DURATION_SEC * 2) {
+        ch.frameTimer -= WALK_FRAME_DURATION_SEC * 2
+        ch.frame = (ch.frame + 1) % 6
+      }
       if (ch.seatTimer < 0) ch.seatTimer = 0 // clear turn-end sentinel
       // If became active, pathfind to seat
       if (ch.isActive) {
@@ -164,8 +170,10 @@ export function updateCharacter(
             }
           }
         }
-        if (walkableTiles.length > 0) {
-          const target = walkableTiles[Math.floor(Math.random() * walkableTiles.length)]
+        // Prefer room-constrained tiles for wandering, fall back to all walkable
+        const wanderTiles = (roomWalkableTiles && roomWalkableTiles.length > 0) ? roomWalkableTiles : walkableTiles
+        if (wanderTiles.length > 0) {
+          const target = wanderTiles[Math.floor(Math.random() * wanderTiles.length)]
           const path = findPath(ch.tileCol, ch.tileRow, target.col, target.row, tileMap, blockedTiles)
           if (path.length > 0) {
             ch.path = path
@@ -185,7 +193,7 @@ export function updateCharacter(
       // Walk animation
       if (ch.frameTimer >= WALK_FRAME_DURATION_SEC) {
         ch.frameTimer -= WALK_FRAME_DURATION_SEC
-        ch.frame = (ch.frame + 1) % 4
+        ch.frame = (ch.frame + 1) % 6
       }
 
       if (ch.path.length === 0) {

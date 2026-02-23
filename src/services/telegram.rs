@@ -1765,6 +1765,9 @@ fn save_session_to_file(session: &ChatSession, current_path: &str) {
         history: saveable_history,
         current_path: current_path.to_string(),
         created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        discord_channel_id: None,
+        discord_channel_name: None,
+        discord_category_name: None,
     };
 
     let file_path = sessions_dir.join(format!("{}.json", session_id));

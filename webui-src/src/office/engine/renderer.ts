@@ -3,9 +3,12 @@ import type { TileType as TileTypeVal, FurnitureInstance, Character, SpriteData,
 import { getCachedSprite, getOutlineSprite } from '../sprites/spriteCache.js'
 import { getCharacterSprites, BUBBLE_PERMISSION_SPRITE, BUBBLE_WAITING_SPRITE } from '../sprites/spriteData.js'
 import { getCharacterSprite } from './characters.js'
+import { hasPngSprites, getPngCharacterFrame, getZoomedPngFrame, getPngOutline } from '../sprites/pngSprites.js'
+import type { SkinName } from '../sprites/pngSprites.js'
 import { renderMatrixEffect } from './matrixEffect.js'
 import { getColorizedFloorSprite, hasFloorSprites, WALL_COLOR } from '../floorTiles.js'
 import { hasWallSprites, getWallInstances, wallColorToHex } from '../wallTiles.js'
+import { hasOfficeTileset, getFloorTileCanvas } from '../officeTileset.js'
 import {
   CHARACTER_SITTING_OFFSET_PX,
   CHARACTER_Z_SORT_OFFSET,
@@ -53,6 +56,7 @@ export function renderTileGrid(
 ): void {
   const s = TILE_SIZE * zoom
   const useSpriteFloors = hasFloorSprites()
+  const useTileset = hasOfficeTileset()
   const tmRows = tileMap.length
   const tmCols = tmRows > 0 ? tileMap[0].length : 0
   const layoutCols = cols ?? tmCols
@@ -65,25 +69,33 @@ export function renderTileGrid(
       // Skip VOID tiles entirely (transparent)
       if (tile === TileType.VOID) continue
 
-      if (tile === TileType.WALL || !useSpriteFloors) {
-        // Wall tiles or fallback: solid color
-        if (tile === TileType.WALL) {
-          const colorIdx = r * layoutCols + c
-          const wallColor = tileColors?.[colorIdx]
-          ctx.fillStyle = wallColor ? wallColorToHex(wallColor) : WALL_COLOR
-        } else {
-          ctx.fillStyle = FALLBACK_FLOOR_COLOR
-        }
+      if (tile === TileType.WALL) {
+        const colorIdx = r * layoutCols + c
+        const wallColor = tileColors?.[colorIdx]
+        ctx.fillStyle = wallColor ? wallColorToHex(wallColor) : WALL_COLOR
         ctx.fillRect(offsetX + c * s, offsetY + r * s, s, s)
         continue
       }
 
-      // Floor tile: get colorized sprite
-      const colorIdx = r * layoutCols + c
-      const color = tileColors?.[colorIdx] ?? { h: 0, s: 0, b: 0, c: 0 }
-      const sprite = getColorizedFloorSprite(tile, color)
-      const cached = getCachedSprite(sprite, zoom)
-      ctx.drawImage(cached, offsetX + c * s, offsetY + r * s)
+      // Floor tile: prefer SkyOffice tileset, fall back to colorized sprite
+      if (useTileset) {
+        const tileCanvas = getFloorTileCanvas(tile, zoom)
+        if (tileCanvas) {
+          ctx.drawImage(tileCanvas, offsetX + c * s, offsetY + r * s)
+          continue
+        }
+      }
+
+      if (useSpriteFloors) {
+        const colorIdx = r * layoutCols + c
+        const color = tileColors?.[colorIdx] ?? { h: 0, s: 0, b: 0, c: 0 }
+        const sprite = getColorizedFloorSprite(tile, color)
+        const cached = getCachedSprite(sprite, zoom)
+        ctx.drawImage(cached, offsetX + c * s, offsetY + r * s)
+      } else {
+        ctx.fillStyle = FALLBACK_FLOOR_COLOR
+        ctx.fillRect(offsetX + c * s, offsetY + r * s, s, s)
+      }
     }
   }
 
@@ -120,10 +132,23 @@ export function renderScene(
   }
 
   // Characters
+  const usePng = hasPngSprites()
   for (const ch of characters) {
-    const sprites = getCharacterSprites(ch.palette, ch.hueShift)
-    const spriteData = getCharacterSprite(ch, sprites)
-    const cached = getCachedSprite(spriteData, zoom)
+    // Try PNG sprites first, fall back to old pixel-array sprites
+    const pngFrame = usePng && ch.skinName
+      ? getPngCharacterFrame(ch.skinName as SkinName, ch.state, ch.dir, ch.frame)
+      : null
+
+    let cached: HTMLCanvasElement
+    let spriteData: SpriteData | null = null
+    if (pngFrame) {
+      cached = getZoomedPngFrame(pngFrame, zoom)
+    } else {
+      const sprites = getCharacterSprites(ch.palette, ch.hueShift)
+      spriteData = getCharacterSprite(ch, sprites)
+      cached = getCachedSprite(spriteData, zoom)
+    }
+
     // Sitting offset: shift character down when seated so they visually sit in the chair
     const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0
     // Anchor at bottom-center of character — round to integer device pixels
@@ -137,6 +162,11 @@ export function renderScene(
 
     // Matrix spawn/despawn effect — skip outline, use per-pixel rendering
     if (ch.matrixEffect) {
+      // For matrix effect, always use old sprite data (fallback if PNG)
+      if (!spriteData) {
+        const sprites = getCharacterSprites(ch.palette, ch.hueShift)
+        spriteData = getCharacterSprite(ch, sprites)
+      }
       const mDrawX = drawX
       const mDrawY = drawY
       const mSpriteData = spriteData
@@ -155,8 +185,14 @@ export function renderScene(
     const isHovered = hoveredAgentId !== null && ch.id === hoveredAgentId
     if (isSelected || isHovered) {
       const outlineAlpha = isSelected ? SELECTED_OUTLINE_ALPHA : HOVERED_OUTLINE_ALPHA
-      const outlineData = getOutlineSprite(spriteData)
-      const outlineCached = getCachedSprite(outlineData, zoom)
+      let outlineCached: HTMLCanvasElement
+      if (pngFrame) {
+        const outlineFrame = getPngOutline(pngFrame)
+        outlineCached = getZoomedPngFrame(outlineFrame, zoom)
+      } else {
+        const outlineData = getOutlineSprite(spriteData!)
+        outlineCached = getCachedSprite(outlineData, zoom)
+      }
       const olDrawX = drawX - zoom  // 1 sprite-pixel offset, scaled
       const olDrawY = drawY - zoom  // outline follows sitting offset via drawY
       drawables.push({
@@ -482,6 +518,72 @@ export function renderBubbles(
   }
 }
 
+// ── Agent name labels & status dots ─────────────────────────────
+
+const STATUS_DOT_ACTIVE_COLOR = '#4ade80'   // green-400
+const STATUS_DOT_WAITING_COLOR = '#fbbf24'  // amber-400
+const STATUS_DOT_IDLE_COLOR = '#9ca3af'     // gray-400
+const STATUS_DOT_OFFSET_PX = 30            // pixels above character anchor
+const STATUS_DOT_RADIUS = 2                 // sprite pixels
+
+// Module-level store for agent display names (set from React)
+const agentNameMap: Record<number, string> = {}
+
+/** Set the display name for an agent (call from React when agentNames changes) */
+export function setAgentDisplayName(id: number, name: string): void {
+  agentNameMap[id] = name
+}
+
+function renderStatusDots(
+  ctx: CanvasRenderingContext2D,
+  characters: Character[],
+  offsetX: number,
+  offsetY: number,
+  zoom: number,
+): void {
+  for (const ch of characters) {
+    if (ch.isSubagent) continue // skip sub-agents
+
+    const color = ch.isActive
+      ? STATUS_DOT_ACTIVE_COLOR
+      : ch.bubbleType === 'waiting'
+        ? STATUS_DOT_WAITING_COLOR
+        : STATUS_DOT_IDLE_COLOR
+
+    const sittingOff = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0
+    const centerX = Math.round(offsetX + ch.x * zoom)
+    const dotY = Math.round(offsetY + (ch.y + sittingOff - STATUS_DOT_OFFSET_PX) * zoom)
+    const r = Math.max(STATUS_DOT_RADIUS * zoom, 2)
+
+    // Draw agent name label
+    const label = agentNameMap[ch.id] || `#${ch.id}`
+    const fontSize = Math.max(Math.round(5 * zoom), 8)
+    ctx.save()
+    ctx.font = `bold ${fontSize}px sans-serif`
+    ctx.textAlign = 'center'
+    ctx.textBaseline = 'bottom'
+    // Text shadow for readability
+    ctx.fillStyle = '#000000'
+    ctx.globalAlpha = 0.6
+    ctx.fillText(label, centerX + 1, dotY - r - 1)
+    ctx.globalAlpha = 1.0
+    ctx.fillStyle = '#ffffff'
+    ctx.fillText(label, centerX, dotY - r - 2)
+    ctx.restore()
+
+    // Draw status dot
+    ctx.save()
+    ctx.beginPath()
+    ctx.arc(centerX, dotY, r, 0, Math.PI * 2)
+    ctx.fillStyle = color
+    ctx.fill()
+    ctx.lineWidth = Math.max(1, zoom * 0.5)
+    ctx.strokeStyle = '#ffffff'
+    ctx.stroke()
+    ctx.restore()
+  }
+}
+
 export interface ButtonBounds {
   /** Center X in device pixels */
   cx: number
@@ -578,6 +680,9 @@ export function renderFrame(
 
   // Speech bubbles (always on top of characters)
   renderBubbles(ctx, characters, offsetX, offsetY, zoom)
+
+  // Persistent status dots above characters
+  renderStatusDots(ctx, characters, offsetX, offsetY, zoom)
 
   // Editor overlays
   if (editor) {

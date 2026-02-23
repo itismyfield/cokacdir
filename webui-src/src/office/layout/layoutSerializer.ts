@@ -1,4 +1,5 @@
-import { TileType, FurnitureType, DEFAULT_COLS, DEFAULT_ROWS, TILE_SIZE, Direction } from '../types.js'
+import { TileType, FurnitureType, TILE_SIZE, Direction } from '../types.js'
+import { SKY_DESK, SKY_CHAIR, SKY_PLANT, SKY_BOOKSHELF, SKY_WHITEBOARD, SKY_VENDINGMACHINE } from './furnitureCatalog.js'
 import type { TileType as TileTypeVal, OfficeLayout, PlacedFurniture, Seat, FurnitureInstance, FloorColor } from '../types.js'
 import { getCatalogEntry } from './furnitureCatalog.js'
 import { getColorizedSprite } from '../colorize.js'
@@ -204,67 +205,120 @@ export function getSeatTiles(seats: Map<string, Seat>): Set<string> {
   return tiles
 }
 
-/** Default floor colors for the two rooms */
-const DEFAULT_LEFT_ROOM_COLOR: FloorColor = { h: 35, s: 30, b: 15, c: 0 }  // warm beige
-const DEFAULT_RIGHT_ROOM_COLOR: FloorColor = { h: 25, s: 45, b: 5, c: 10 }  // warm brown
-const DEFAULT_CARPET_COLOR: FloorColor = { h: 280, s: 40, b: -5, c: 0 }     // purple
-const DEFAULT_DOORWAY_COLOR: FloorColor = { h: 35, s: 25, b: 10, c: 0 }     // tan
+/** Default floor colors (used for fallback when tileset is unavailable) */
+const ROOM_A_COLOR: FloorColor = { h: 35, s: 30, b: 15, c: 0 }   // warm beige
+const ROOM_B_COLOR: FloorColor = { h: 25, s: 45, b: 5, c: 10 }   // warm brown
+const ROOM_C_COLOR: FloorColor = { h: 200, s: 30, b: 5, c: 0 }   // cool blue-gray
+const ROOM_D_COLOR: FloorColor = { h: 140, s: 25, b: 5, c: 0 }   // soft green
+const DOORWAY_COLOR: FloorColor = { h: 35, s: 25, b: 10, c: 0 }  // tan
 
-/** Create the default office layout matching the current hardcoded office */
+/**
+ * Create a 4-room office layout with SkyOffice furniture.
+ * Grid: 28×20. Each room has 2 computer desks (3×2) and 4 chairs.
+ * Total: 8 desks, 16 seats — supports up to 16 agents.
+ */
 export function createDefaultLayout(): OfficeLayout {
+  const COLS = 28
+  const ROWS = 20
   const W = TileType.WALL
   const F1 = TileType.FLOOR_1
   const F2 = TileType.FLOOR_2
   const F3 = TileType.FLOOR_3
   const F4 = TileType.FLOOR_4
+  const F5 = TileType.FLOOR_5  // doorway
 
   const tiles: TileTypeVal[] = []
   const tileColors: Array<FloorColor | null> = []
 
-  for (let r = 0; r < DEFAULT_ROWS; r++) {
-    for (let c = 0; c < DEFAULT_COLS; c++) {
-      if (r === 0 || r === DEFAULT_ROWS - 1) { tiles.push(W); tileColors.push(null); continue }
-      if (c === 0 || c === DEFAULT_COLS - 1) { tiles.push(W); tileColors.push(null); continue }
-      if (c === 10) {
-        if (r >= 4 && r <= 6) {
-          tiles.push(F4); tileColors.push(DEFAULT_DOORWAY_COLOR)
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      // Outer walls
+      if (r === 0 || r === ROWS - 1 || c === 0 || c === COLS - 1) {
+        tiles.push(W); tileColors.push(null); continue
+      }
+      // Vertical divider at col 14
+      if (c === 14) {
+        // Doorways at rows 4-5 and rows 13-14
+        if ((r >= 4 && r <= 5) || (r >= 13 && r <= 14)) {
+          tiles.push(F5); tileColors.push(DOORWAY_COLOR)
         } else {
           tiles.push(W); tileColors.push(null)
         }
         continue
       }
-      if (c >= 15 && c <= 18 && r >= 7 && r <= 9) {
-        tiles.push(F3); tileColors.push(DEFAULT_CARPET_COLOR); continue
+      // Horizontal divider at row 10
+      if (r === 10) {
+        // Doorways at cols 6-7 and cols 20-21
+        if ((c >= 6 && c <= 7) || (c >= 20 && c <= 21)) {
+          tiles.push(F5); tileColors.push(DOORWAY_COLOR)
+        } else {
+          tiles.push(W); tileColors.push(null)
+        }
+        continue
       }
-      if (c < 10) {
-        tiles.push(F1); tileColors.push(DEFAULT_LEFT_ROOM_COLOR)
+      // Room assignment
+      if (c < 14 && r < 10) {
+        tiles.push(F1); tileColors.push(ROOM_A_COLOR)
+      } else if (c > 14 && r < 10) {
+        tiles.push(F2); tileColors.push(ROOM_B_COLOR)
+      } else if (c < 14 && r > 10) {
+        tiles.push(F3); tileColors.push(ROOM_C_COLOR)
       } else {
-        tiles.push(F2); tileColors.push(DEFAULT_RIGHT_ROOM_COLOR)
+        tiles.push(F4); tileColors.push(ROOM_D_COLOR)
       }
     }
   }
 
+  // Helper: generate furniture for one room
+  // Each room gets 2 sky_desks and 4 sky_chairs (one above + one below each desk)
+  function roomFurniture(
+    prefix: string, deskCol1: number, deskCol2: number, deskRow: number,
+  ): PlacedFurniture[] {
+    return [
+      // Desks (3×2)
+      { uid: `${prefix}-desk-a`, type: SKY_DESK, col: deskCol1, row: deskRow },
+      { uid: `${prefix}-desk-b`, type: SKY_DESK, col: deskCol2, row: deskRow },
+      // Chairs above desks (face DOWN toward desk)
+      { uid: `${prefix}-ch-a-top`, type: SKY_CHAIR, col: deskCol1 + 1, row: deskRow - 1 },
+      { uid: `${prefix}-ch-b-top`, type: SKY_CHAIR, col: deskCol2 + 1, row: deskRow - 1 },
+      // Chairs below desks (face UP toward desk)
+      { uid: `${prefix}-ch-a-bot`, type: SKY_CHAIR, col: deskCol1 + 1, row: deskRow + 2 },
+      { uid: `${prefix}-ch-b-bot`, type: SKY_CHAIR, col: deskCol2 + 1, row: deskRow + 2 },
+    ]
+  }
+
   const furniture: PlacedFurniture[] = [
-    { uid: 'desk-left', type: FurnitureType.DESK, col: 4, row: 3 },
-    { uid: 'desk-right', type: FurnitureType.DESK, col: 13, row: 3 },
-    { uid: 'bookshelf-1', type: FurnitureType.BOOKSHELF, col: 1, row: 5 },
-    { uid: 'plant-left', type: FurnitureType.PLANT, col: 1, row: 1 },
-    { uid: 'cooler-1', type: FurnitureType.COOLER, col: 17, row: 7 },
-    { uid: 'plant-right', type: FurnitureType.PLANT, col: 18, row: 1 },
-    { uid: 'whiteboard-1', type: FurnitureType.WHITEBOARD, col: 15, row: 0 },
-    // Left desk chairs
-    { uid: 'chair-l-top', type: FurnitureType.CHAIR, col: 4, row: 2 },
-    { uid: 'chair-l-bottom', type: FurnitureType.CHAIR, col: 5, row: 5 },
-    { uid: 'chair-l-left', type: FurnitureType.CHAIR, col: 3, row: 4 },
-    { uid: 'chair-l-right', type: FurnitureType.CHAIR, col: 6, row: 3 },
-    // Right desk chairs
-    { uid: 'chair-r-top', type: FurnitureType.CHAIR, col: 13, row: 2 },
-    { uid: 'chair-r-bottom', type: FurnitureType.CHAIR, col: 14, row: 5 },
-    { uid: 'chair-r-left', type: FurnitureType.CHAIR, col: 12, row: 4 },
-    { uid: 'chair-r-right', type: FurnitureType.CHAIR, col: 15, row: 3 },
+    // Room 1 (top-left): desks at cols 2 and 8, row 3
+    ...roomFurniture('r1', 2, 8, 3),
+    // Room 2 (top-right): desks at cols 16 and 22, row 3
+    ...roomFurniture('r2', 16, 22, 3),
+    // Room 3 (bottom-left): desks at cols 2 and 8, row 13
+    ...roomFurniture('r3', 2, 8, 13),
+    // Room 4 (bottom-right): desks at cols 16 and 22, row 13
+    ...roomFurniture('r4', 16, 22, 13),
+    // Plants (2×2 footprint, backgroundTiles:1) — corners of each room
+    { uid: 'plant-1', type: SKY_PLANT, col: 1, row: 1 },
+    { uid: 'plant-2', type: SKY_PLANT, col: 12, row: 1 },
+    { uid: 'plant-3', type: SKY_PLANT, col: 15, row: 1 },
+    { uid: 'plant-4', type: SKY_PLANT, col: 25, row: 1 },
+    { uid: 'plant-5', type: SKY_PLANT, col: 1, row: 17 },
+    { uid: 'plant-6', type: SKY_PLANT, col: 12, row: 17 },
+    { uid: 'plant-7', type: SKY_PLANT, col: 15, row: 17 },
+    { uid: 'plant-8', type: SKY_PLANT, col: 25, row: 17 },
+    // Bookshelves (1×2, backgroundTiles:1) — along walls
+    { uid: 'shelf-1', type: SKY_BOOKSHELF, col: 6, row: 1 },
+    { uid: 'shelf-2', type: SKY_BOOKSHELF, col: 7, row: 1 },
+    { uid: 'shelf-3', type: SKY_BOOKSHELF, col: 20, row: 1 },
+    { uid: 'shelf-4', type: SKY_BOOKSHELF, col: 21, row: 1 },
+    // Whiteboards (2×2, backgroundTiles:1)
+    { uid: 'wb-1', type: SKY_WHITEBOARD, col: 4, row: 7 },
+    { uid: 'wb-2', type: SKY_WHITEBOARD, col: 18, row: 7 },
+    // Vending machines (2×2)
+    { uid: 'vm-1', type: SKY_VENDINGMACHINE, col: 1, row: 11 },
+    { uid: 'vm-2', type: SKY_VENDINGMACHINE, col: 25, row: 11 },
   ]
 
-  return { version: 1, cols: DEFAULT_COLS, rows: DEFAULT_ROWS, tiles, tileColors, furniture }
+  return { version: 1, cols: COLS, rows: ROWS, tiles, tileColors, furniture }
 }
 
 /** Serialize layout to JSON string */
@@ -283,11 +337,21 @@ export function deserializeLayout(json: string): OfficeLayout | null {
   return null
 }
 
+/** Old pixel-art furniture types that should trigger a full layout reset */
+const LEGACY_FURNITURE_TYPES = new Set(['desk', 'bookshelf', 'plant', 'cooler', 'whiteboard', 'pc', 'lamp'])
+
 /**
- * Ensure layout has tileColors. If missing, generate defaults based on tile types.
- * Exported for use by message handlers that receive layouts over the wire.
+ * Migrate layout. If it contains old pixel-art furniture types, returns null
+ * to signal the caller to use the new SkyOffice default layout instead.
+ * Otherwise ensures tileColors are present.
  */
-export function migrateLayoutColors(layout: OfficeLayout): OfficeLayout {
+export function migrateLayoutColors(layout: OfficeLayout): OfficeLayout | null {
+  // Detect legacy furniture → discard saved layout, use new default
+  const hasLegacy = layout.furniture.some(f => LEGACY_FURNITURE_TYPES.has(f.type))
+  if (hasLegacy) {
+    console.log('[layout] Legacy furniture detected — resetting to SkyOffice default layout')
+    return null
+  }
   return migrateLayout(layout)
 }
 
@@ -309,16 +373,16 @@ function migrateLayout(layout: OfficeLayout): OfficeLayout {
         tileColors.push(null)
         break
       case 1: // was TILE_FLOOR → FLOOR_1 beige
-        tileColors.push(DEFAULT_LEFT_ROOM_COLOR)
+        tileColors.push(ROOM_A_COLOR)
         break
       case 2: // was WOOD_FLOOR → FLOOR_2 brown
-        tileColors.push(DEFAULT_RIGHT_ROOM_COLOR)
+        tileColors.push(ROOM_B_COLOR)
         break
       case 3: // was CARPET → FLOOR_3 purple
-        tileColors.push(DEFAULT_CARPET_COLOR)
+        tileColors.push(ROOM_C_COLOR)
         break
       case 4: // was DOORWAY → FLOOR_4 tan
-        tileColors.push(DEFAULT_DOORWAY_COLOR)
+        tileColors.push(DOORWAY_COLOR)
         break
       default:
         // New tile types (5-7) without colors — use neutral gray

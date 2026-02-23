@@ -2,8 +2,8 @@ import type { FloorColor } from './office/types.js'
 
 // ── Grid & Layout ────────────────────────────────────────────
 export const TILE_SIZE = 16
-export const DEFAULT_COLS = 20
-export const DEFAULT_ROWS = 11
+export const DEFAULT_COLS = 28
+export const DEFAULT_ROWS = 20
 export const MAX_COLS = 64
 export const MAX_ROWS = 64
 
@@ -47,7 +47,7 @@ export const BUTTON_ICON_SIZE_FACTOR = 0.45
 export const BUTTON_LINE_WIDTH_MIN = 1.5
 export const BUTTON_LINE_WIDTH_ZOOM_FACTOR = 0.5
 export const BUBBLE_FADE_DURATION_SEC = 0.5
-export const BUBBLE_SITTING_OFFSET_PX = 10
+export const BUBBLE_SITTING_OFFSET_PX = 6
 export const BUBBLE_VERTICAL_OFFSET_PX = 24
 export const FALLBACK_FLOOR_COLOR = '#808080'
 

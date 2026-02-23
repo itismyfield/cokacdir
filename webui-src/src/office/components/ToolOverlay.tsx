@@ -9,6 +9,8 @@ interface ToolOverlayProps {
   officeState: OfficeState
   agents: number[]
   agentTools: Record<number, ToolActivity[]>
+  agentStatuses: Record<number, string>
+  agentNames: Record<number, string>
   subagentCharacters: SubagentCharacter[]
   containerRef: React.RefObject<HTMLDivElement | null>
   zoom: number
@@ -21,6 +23,7 @@ function getActivityText(
   agentId: number,
   agentTools: Record<number, ToolActivity[]>,
   isActive: boolean,
+  agentStatuses?: Record<number, string>,
 ): string {
   const tools = agentTools[agentId]
   if (tools && tools.length > 0) {
@@ -37,6 +40,11 @@ function getActivityText(
     }
   }
 
+  // Use real-time status if available
+  if (isActive) return 'Working...'
+  const status = agentStatuses?.[agentId]
+  if (status === 'waiting') return 'Waiting'
+
   return 'Idle'
 }
 
@@ -44,6 +52,8 @@ export function ToolOverlay({
   officeState,
   agents,
   agentTools,
+  agentStatuses,
+  agentNames,
   subagentCharacters,
   containerRef,
   zoom,
@@ -108,7 +118,7 @@ export function ToolOverlay({
             activityText = sub ? sub.label : 'Subtask'
           }
         } else {
-          activityText = getActivityText(id, agentTools, ch.isActive)
+          activityText = getActivityText(id, agentTools, ch.isActive, agentStatuses)
         }
 
         // Determine dot color
@@ -176,7 +186,7 @@ export function ToolOverlay({
                   textOverflow: 'ellipsis',
                 }}
               >
-                {activityText}
+                {!isSub && agentNames[id] ? `${agentNames[id]}: ${activityText}` : activityText}
               </span>
               {isSelected && !isSub && (
                 <button

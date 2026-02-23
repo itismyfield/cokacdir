@@ -381,6 +381,15 @@ pub struct SessionData {
     pub history: Vec<HistoryItem>,
     pub current_path: String,
     pub created_at: String,
+    /// Discord channel ID (optional, set by Discord bot)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_channel_id: Option<u64>,
+    /// Discord channel name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_channel_name: Option<String>,
+    /// Discord parent category name
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discord_category_name: Option<String>,
 }
 
 /// Get the AI sessions directory path (~/.cokacdir/ai_sessions)
@@ -461,6 +470,9 @@ impl AIScreenState {
             history: saveable_history,
             current_path: self.current_path.clone(),
             created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+            discord_channel_id: None,
+            discord_channel_name: None,
+            discord_category_name: None,
         };
 
         let file_path = sessions_dir.join(format!("{}.json", session_id));

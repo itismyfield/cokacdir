@@ -9,6 +9,9 @@ import { setWallSprites } from '../office/wallTiles.js'
 import { setCharacterTemplates } from '../office/sprites/spriteData.js'
 import { vscode } from '../vscodeApi.js'
 import { playDoneSound, setSoundEnabled } from '../notificationSound.js'
+import { loadPngSprites } from '../office/sprites/pngSprites.js'
+import { loadOfficeTileset } from '../office/officeTileset.js'
+import { loadSkyOfficeItems } from '../office/skyofficeAssets.js'
 
 export interface SubagentCharacter {
   id: number
@@ -40,6 +43,7 @@ export interface ExtensionMessageState {
   selectedAgent: number | null
   agentTools: Record<number, ToolActivity[]>
   agentStatuses: Record<number, string>
+  agentNames: Record<number, string>
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
   layoutReady: boolean
@@ -64,6 +68,7 @@ export function useExtensionMessages(
   const [selectedAgent, setSelectedAgent] = useState<number | null>(null)
   const [agentTools, setAgentTools] = useState<Record<number, ToolActivity[]>>({})
   const [agentStatuses, setAgentStatuses] = useState<Record<number, string>>({})
+  const [agentNames, setAgentNames] = useState<Record<number, string>>({})
   const [subagentTools, setSubagentTools] = useState<Record<number, Record<string, ToolActivity[]>>>({})
   const [subagentCharacters, setSubagentCharacters] = useState<SubagentCharacter[]>([])
   const [layoutReady, setLayoutReady] = useState(false)
@@ -74,7 +79,7 @@ export function useExtensionMessages(
 
   useEffect(() => {
     // Buffer agents from existingAgents until layout is loaded
-    let pendingAgents: Array<{ id: number; palette?: number; hueShift?: number; seatId?: string }> = []
+    let pendingAgents: Array<{ id: number; palette?: number; hueShift?: number; seatId?: string; categoryName?: string }> = []
 
     const handler = (e: MessageEvent) => {
       const msg = e.data
@@ -95,9 +100,78 @@ export function useExtensionMessages(
           // Default layout — snapshot whatever OfficeState built
           onLayoutLoaded?.(os.getLayout())
         }
-        // Add buffered agents now that layout (and seats) are correct
+        // Add buffered agents now that layout (and seats) are correct.
+        // Group seats by room (tile type) for category-based placement.
+        const roomSeats = new Map<number, string[]>()
+        for (const [uid, seat] of os.seats) {
+          if (seat.assigned) continue
+          const tileType = os.tileMap[seat.seatRow]?.[seat.seatCol] ?? 0
+          if (tileType === 0 || tileType === 8) continue // skip WALL/VOID
+          const list = roomSeats.get(tileType) || []
+          list.push(uid)
+          roomSeats.set(tileType, list)
+        }
+        const roomKeys = [...roomSeats.keys()]
+
+        // Map each unique category to a room
+        const categoryToRoom = new Map<string, number>()
+        let roomIdx = 0
         for (const p of pendingAgents) {
-          os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true)
+          if (p.categoryName && !categoryToRoom.has(p.categoryName)) {
+            if (roomKeys.length > 0) {
+              categoryToRoom.set(p.categoryName, roomKeys[roomIdx % roomKeys.length])
+              roomIdx++
+            }
+          }
+        }
+
+        // Identify rooms NOT claimed by any category (for uncategorized agents)
+        const claimedRooms = new Set(categoryToRoom.values())
+        const unclaimedRoomKeys = roomKeys.filter((k) => !claimedRooms.has(k))
+
+        // Process categorized agents first so they claim their room seats
+        // before uncategorized agents get assigned to unclaimed rooms
+        const sorted = [...pendingAgents].sort((a, b) => {
+          const aHas = a.categoryName ? 0 : 1
+          const bHas = b.categoryName ? 0 : 1
+          return aHas - bHas
+        })
+        let unclaimedIdx = 0
+        for (const p of sorted) {
+          let seatId: string | undefined = p.seatId
+          if (!seatId && p.categoryName) {
+            // Categorized agent: assign to its category's room
+            const tileType = categoryToRoom.get(p.categoryName)
+            if (tileType !== undefined) {
+              const seats = roomSeats.get(tileType)
+              if (seats && seats.length > 0) {
+                seatId = seats.shift()
+              }
+            }
+          } else if (!seatId && !p.categoryName) {
+            // Uncategorized agent: assign to unclaimed rooms first
+            if (unclaimedRoomKeys.length > 0) {
+              const tileType = unclaimedRoomKeys[unclaimedIdx % unclaimedRoomKeys.length]
+              const seats = roomSeats.get(tileType)
+              if (seats && seats.length > 0) {
+                seatId = seats.shift()
+              } else {
+                // This unclaimed room is full, try next one
+                unclaimedIdx++
+                const nextType = unclaimedRoomKeys[unclaimedIdx % unclaimedRoomKeys.length]
+                const nextSeats = roomSeats.get(nextType)
+                if (nextSeats && nextSeats.length > 0) {
+                  seatId = nextSeats.shift()
+                }
+              }
+              // Advance to next unclaimed room when current is full
+              const currentSeats = roomSeats.get(unclaimedRoomKeys[unclaimedIdx % unclaimedRoomKeys.length])
+              if (!currentSeats || currentSeats.length === 0) {
+                unclaimedIdx++
+              }
+            }
+          }
+          os.addAgent(p.id, p.palette, p.hueShift, seatId, true)
         }
         pendingAgents = []
         layoutReadyRef.current = true
@@ -139,11 +213,18 @@ export function useExtensionMessages(
         os.removeAgent(id)
       } else if (msg.type === 'existingAgents') {
         const incoming = msg.agents as number[]
-        const meta = (msg.agentMeta || {}) as Record<number, { palette?: number; hueShift?: number; seatId?: string }>
+        const meta = (msg.agentMeta || {}) as Record<number, { palette?: number; hueShift?: number; seatId?: string; channelName?: string; categoryName?: string }>
         // Buffer agents — they'll be added in layoutLoaded after seats are built
+        const names: Record<number, string> = {}
         for (const id of incoming) {
           const m = meta[id]
-          pendingAgents.push({ id, palette: m?.palette, hueShift: m?.hueShift, seatId: m?.seatId })
+          pendingAgents.push({ id, palette: m?.palette, hueShift: m?.hueShift, seatId: m?.seatId, categoryName: m?.categoryName })
+          if (m?.channelName) {
+            names[id] = m.channelName
+          }
+        }
+        if (Object.keys(names).length > 0) {
+          setAgentNames((prev) => ({ ...prev, ...names }))
         }
         setAgents((prev) => {
           const ids = new Set(prev)
@@ -344,9 +425,17 @@ export function useExtensionMessages(
       }
     }
     window.addEventListener('message', handler)
+    // Load PNG character sprites from assets
+    loadPngSprites('./assets').catch((err) => console.warn('[Webview] PNG sprite load failed:', err))
+    loadOfficeTileset('./assets').catch((err) => console.warn('[Webview] Office tileset load failed:', err))
+    loadSkyOfficeItems('./assets', () => {
+      // Rebuild furniture instances now that real sprites have replaced placeholders
+      const os = getOfficeState()
+      os.refreshFurniture()
+    }).catch((err) => console.warn('[Webview] SkyOffice items load failed:', err))
     vscode.postMessage({ type: 'webviewReady' })
     return () => window.removeEventListener('message', handler)
   }, [getOfficeState])
 
-  return { agents, selectedAgent, agentTools, agentStatuses, subagentTools, subagentCharacters, layoutReady, loadedAssets }
+  return { agents, selectedAgent, agentTools, agentStatuses, agentNames, subagentTools, subagentCharacters, layoutReady, loadedAssets }
 }

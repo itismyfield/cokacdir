@@ -1,4 +1,4 @@
-import { FurnitureType } from '../types.js'
+import { FurnitureType, TILE_SIZE } from '../types.js'
 import type { FurnitureCatalogEntry, SpriteData } from '../types.js'
 import {
   DESK_SQUARE_SPRITE,
@@ -10,6 +10,21 @@ import {
   PC_SPRITE,
   LAMP_SPRITE,
 } from '../sprites/spriteData.js'
+
+/** SkyOffice furniture type IDs */
+export const SKY_DESK = 'sky_desk'
+export const SKY_CHAIR = 'sky_chair'
+export const SKY_PLANT = 'sky_plant'
+export const SKY_BOOKSHELF = 'sky_bookshelf'
+export const SKY_WHITEBOARD = 'sky_whiteboard'
+export const SKY_VENDINGMACHINE = 'sky_vendingmachine'
+
+/** Create a solid-color placeholder sprite of given tile dimensions */
+function placeholderSprite(tileCols: number, tileRows: number, color = '#555566'): SpriteData {
+  const w = tileCols * TILE_SIZE
+  const h = tileRows * TILE_SIZE
+  return Array.from({ length: h }, () => Array(w).fill(color) as string[])
+}
 
 export interface LoadedAssetData {
   catalog: Array<{
@@ -48,6 +63,13 @@ export const FURNITURE_CATALOG: CatalogEntryWithCategory[] = [
   { type: FurnitureType.PC,         label: 'PC',         footprintW: 1, footprintH: 1, sprite: PC_SPRITE,           isDesk: false, category: 'electronics' },
   { type: FurnitureType.LAMP,       label: 'Lamp',       footprintW: 1, footprintH: 1, sprite: LAMP_SPRITE,         isDesk: false, category: 'decor' },
 
+  // ── SkyOffice furniture (placeholder sprites, replaced at runtime by loadSkyOfficeItems) ──
+  { type: SKY_DESK,  label: 'Computer Desk',  footprintW: 3, footprintH: 2, sprite: placeholderSprite(3, 2), isDesk: true,  category: 'desks' },
+  { type: SKY_CHAIR, label: 'Office Chair',   footprintW: 1, footprintH: 1, sprite: placeholderSprite(1, 2), isDesk: false, category: 'chairs' },
+  { type: SKY_PLANT, label: 'Plant',          footprintW: 2, footprintH: 2, sprite: placeholderSprite(2, 2), isDesk: false, category: 'decor', backgroundTiles: 1 },
+  { type: SKY_BOOKSHELF, label: 'Bookshelf',  footprintW: 1, footprintH: 2, sprite: placeholderSprite(1, 2), isDesk: false, category: 'storage', backgroundTiles: 1 },
+  { type: SKY_WHITEBOARD, label: 'Whiteboard', footprintW: 2, footprintH: 2, sprite: placeholderSprite(2, 2), isDesk: false, category: 'decor', backgroundTiles: 1 },
+  { type: SKY_VENDINGMACHINE, label: 'Vending Machine', footprintW: 2, footprintH: 2, sprite: placeholderSprite(2, 2), isDesk: false, category: 'misc' },
 ]
 
 // ── Rotation groups ──────────────────────────────────────────────

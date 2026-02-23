@@ -15,8 +15,9 @@ import {
 } from '../../constants.js'
 import type { Character, Seat, FurnitureInstance, TileType as TileTypeVal, OfficeLayout, PlacedFurniture } from '../types.js'
 import { createCharacter, updateCharacter } from './characters.js'
+import { getSkinForAgent } from '../sprites/pngSprites.js'
 import { matrixEffectSeeds } from './matrixEffect.js'
-import { isWalkable, getWalkableTiles, findPath } from '../layout/tileMap.js'
+import { isWalkable, getWalkableTiles, getWalkableTilesForRoom, findPath } from '../layout/tileMap.js'
 import {
   createDefaultLayout,
   layoutToTileMap,
@@ -33,6 +34,8 @@ export class OfficeState {
   blockedTiles: Set<string>
   furniture: FurnitureInstance[]
   walkableTiles: Array<{ col: number; row: number }>
+  /** Cached per-room walkable tiles keyed by tile type */
+  private roomWalkableCache: Map<number, Array<{ col: number; row: number }>> = new Map()
   characters: Map<number, Character> = new Map()
   selectedAgentId: number | null = null
   cameraFollowId: number | null = null
@@ -51,6 +54,7 @@ export class OfficeState {
     this.blockedTiles = getBlockedTiles(this.layout.furniture)
     this.furniture = layoutToFurnitureInstances(this.layout.furniture)
     this.walkableTiles = getWalkableTiles(this.tileMap, this.blockedTiles)
+    this.roomWalkableCache.clear()
   }
 
   /** Rebuild all derived state from a new layout. Reassigns existing characters.
@@ -62,6 +66,7 @@ export class OfficeState {
     this.blockedTiles = getBlockedTiles(layout.furniture)
     this.rebuildFurnitureInstances()
     this.walkableTiles = getWalkableTiles(this.tileMap, this.blockedTiles)
+    this.roomWalkableCache.clear()
 
     // Shift character positions when grid expands left/up
     if (shift && (shift.col !== 0 || shift.row !== 0)) {
@@ -142,6 +147,11 @@ export class OfficeState {
     return this.layout
   }
 
+  /** Refresh furniture instances from current catalog sprites (call after async asset load) */
+  refreshFurniture(): void {
+    this.rebuildFurnitureInstances()
+  }
+
   /** Get the blocked-tile key for a character's own seat, or null */
   private ownSeatKey(ch: Character): string | null {
     if (!ch.seatId) return null
@@ -219,17 +229,19 @@ export class OfficeState {
       seatId = this.findFreeSeat()
     }
 
+    const skinName = getSkinForAgent(this.characters.size)
+
     let ch: Character
     if (seatId) {
       const seat = this.seats.get(seatId)!
       seat.assigned = true
-      ch = createCharacter(id, palette, seatId, seat, hueShift)
+      ch = createCharacter(id, palette, seatId, seat, hueShift, skinName)
     } else {
       // No seats — spawn at random walkable tile
       const spawn = this.walkableTiles.length > 0
         ? this.walkableTiles[Math.floor(Math.random() * this.walkableTiles.length)]
         : { col: 1, row: 1 }
-      ch = createCharacter(id, palette, null, null, hueShift)
+      ch = createCharacter(id, palette, null, null, hueShift, skinName)
       ch.x = spawn.col * TILE_SIZE + TILE_SIZE / 2
       ch.y = spawn.row * TILE_SIZE + TILE_SIZE / 2
       ch.tileCol = spawn.col
@@ -630,9 +642,26 @@ export class OfficeState {
         continue // skip normal FSM while effect is active
       }
 
+      // Determine room-constrained walkable tiles for this character
+      let roomTiles: Array<{ col: number; row: number }> | undefined
+      if (ch.seatId) {
+        const seat = this.seats.get(ch.seatId)
+        if (seat) {
+          const roomType = this.tileMap[seat.seatRow]?.[seat.seatCol] ?? 0
+          if (roomType > 0 && roomType !== 8) {
+            let cached = this.roomWalkableCache.get(roomType)
+            if (!cached) {
+              cached = getWalkableTilesForRoom(this.tileMap, this.blockedTiles, roomType)
+              this.roomWalkableCache.set(roomType, cached)
+            }
+            roomTiles = cached
+          }
+        }
+      }
+
       // Temporarily unblock own seat so character can pathfind to it
       this.withOwnSeatUnblocked(ch, () =>
-        updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles)
+        updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles, roomTiles)
       )
 
       // Tick bubble timer for waiting bubbles

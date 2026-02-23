@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::fs;
 
 use axum::{
@@ -14,6 +14,35 @@ use tokio::sync::{Mutex, broadcast};
 
 use crate::ui::ai_screen;
 
+// ─── Global bridge: discord.rs → webui.rs real-time status updates ──────────
+
+static WEBUI_TX: OnceLock<broadcast::Sender<String>> = OnceLock::new();
+static WEBUI_AGENTS: OnceLock<Arc<Mutex<HashMap<String, AgentSnapshot>>>> = OnceLock::new();
+
+/// Push a real-time status update to all connected WebSocket clients.
+/// Called from discord.rs when agent status changes.
+pub fn push_status_by_session(session_id: &str, status: &str) {
+    let (Some(tx), Some(agents)) = (WEBUI_TX.get(), WEBUI_AGENTS.get()) else {
+        return;
+    };
+    // Look up the numeric agent ID from session_id
+    let agent_id = {
+        let Ok(map) = agents.try_lock() else { return };
+        match map.get(session_id) {
+            Some(agent) => agent.id,
+            None => return,
+        }
+    };
+    let msg = serde_json::json!({
+        "type": "agentStatus",
+        "id": agent_id,
+        "status": status,
+    });
+    if let Ok(json) = serde_json::to_string(&msg) {
+        let _ = tx.send(json);
+    }
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 /// Lightweight snapshot of a Claude Code session for the web UI
@@ -25,6 +54,8 @@ struct AgentSnapshot {
     status: String, // "active" or "waiting"
     last_tool: Option<String>,
     last_activity: String,
+    channel_name: Option<String>,
+    category_name: Option<String>,
 }
 
 /// Messages sent to all connected WebSocket clients
@@ -53,7 +84,7 @@ enum WsOutMessage {
 
 struct AppState {
     tx: broadcast::Sender<String>,
-    agents: Mutex<HashMap<String, AgentSnapshot>>,
+    agents: Arc<Mutex<HashMap<String, AgentSnapshot>>>,
     sessions_dir: PathBuf,
     webui_dir: PathBuf,
 }
@@ -80,9 +111,15 @@ pub async fn run_webui(port: u16) {
 
     let (tx, _) = broadcast::channel::<String>(256);
 
+    // Register the broadcast sender globally so discord.rs can push real-time updates
+    let _ = WEBUI_TX.set(tx.clone());
+
+    let agents_map = Arc::new(Mutex::new(HashMap::new()));
+    let _ = WEBUI_AGENTS.set(agents_map.clone());
+
     let state = Arc::new(AppState {
         tx: tx.clone(),
-        agents: Mutex::new(HashMap::new()),
+        agents: agents_map,
         sessions_dir: sessions_dir.clone(),
         webui_dir: webui_dir.clone(),
     });
@@ -206,6 +243,8 @@ fn load_session_file(path: &Path, next_id: usize) -> Option<AgentSnapshot> {
         status: status.to_string(),
         last_tool,
         last_activity: data.created_at,
+        channel_name: data.discord_channel_name,
+        category_name: data.discord_category_name,
     })
 }
 
@@ -255,19 +294,10 @@ async fn watch_sessions(state: Arc<AppState>) {
             }
         }
 
-        for (sid, new_agent) in new_agents.iter() {
-            if let Some(old_agent) = old_agents.get(sid) {
-                if old_agent.status != new_agent.status {
-                    broadcast_msg(&state.tx, &WsOutMessage::AgentStatus {
-                        id: new_agent.id,
-                        status: new_agent.status.clone(),
-                    });
-                }
-            }
-        }
-
-        let snapshots: Vec<AgentSnapshot> = new_agents.values().cloned().collect();
-        broadcast_msg(&state.tx, &WsOutMessage::ExistingAgents { agents: snapshots });
+        // Note: we do NOT broadcast file-based AgentStatus here,
+        // because it would overwrite real-time status pushed by discord.rs.
+        // Individual AgentCreated/AgentClosed messages above are sufficient
+        // for tracking agent membership changes.
     }
 }
 
@@ -302,9 +332,23 @@ async fn handle_ws(mut socket: ws::WebSocket, state: Arc<AppState>) {
     };
     let agent_ids: Vec<usize> = agents.iter().map(|a| a.id).collect();
 
+    // Build agentMeta with category info for each agent
+    let mut agent_meta = serde_json::Map::new();
+    for agent in &agents {
+        let mut meta = serde_json::Map::new();
+        if let Some(ref name) = agent.channel_name {
+            meta.insert("channelName".to_string(), serde_json::Value::String(name.clone()));
+        }
+        if let Some(ref cat) = agent.category_name {
+            meta.insert("categoryName".to_string(), serde_json::Value::String(cat.clone()));
+        }
+        agent_meta.insert(agent.id.to_string(), serde_json::Value::Object(meta));
+    }
+
     let init_json = serde_json::json!({
         "type": "existingAgents",
         "agents": agent_ids,
+        "agentMeta": agent_meta,
     });
     if let Ok(json) = serde_json::to_string(&init_json) {
         let _ = socket.send(ws::Message::Text(json.into())).await;

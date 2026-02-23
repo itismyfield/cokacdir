@@ -30,6 +30,10 @@ struct DiscordSession {
     history: Vec<HistoryItem>,
     pending_uploads: Vec<String>,
     cleared: bool,
+    /// Discord channel name (for webui display)
+    channel_name: Option<String>,
+    /// Discord parent category name (for webui room grouping)
+    category_name: Option<String>,
 }
 
 /// Bot-level settings persisted to disk
@@ -396,9 +400,17 @@ pub async fn run_bot(token: &str) {
             ..Default::default()
         })
         .setup(move |ctx, _ready, framework| {
+            let ctx_clone = ctx.clone();
+            let shared_for_migrate = shared_clone.clone();
             Box::pin(async move {
                 poise::builtins::register_globally(ctx, &framework.options().commands).await?;
                 println!("  ✓ Bot connected — Listening for messages");
+
+                // Background: resolve category names for all known channels
+                tokio::spawn(async move {
+                    migrate_session_categories(&ctx_clone, &shared_for_migrate).await;
+                });
+
                 Ok(Data {
                     shared: shared_clone,
                     token: token_owned,
@@ -533,7 +545,7 @@ async fn handle_event(
             }
 
             // Auto-restore session
-            auto_restore_session(&data.shared, channel_id).await;
+            auto_restore_session(&data.shared, channel_id, ctx).await;
 
             // Block messages while AI is in progress for this channel
             {
@@ -628,6 +640,9 @@ async fn cmd_start(
     // Try to load existing session for this path
     let existing = load_existing_session(&canonical_path);
 
+    // Resolve channel/category names before taking the lock
+    let (ch_name, cat_name) = resolve_channel_category(ctx.serenity_context(), ctx.channel_id()).await;
+
     let mut response_lines = Vec::new();
 
     {
@@ -640,7 +655,11 @@ async fn cmd_start(
             history: Vec::new(),
             pending_uploads: Vec::new(),
             cleared: false,
+            channel_name: None,
+            category_name: None,
         });
+        session.channel_name = ch_name;
+        session.category_name = cat_name;
 
         if let Some((session_data, _)) = &existing {
             session.session_id = Some(session_data.session_id.clone());
@@ -1202,7 +1221,7 @@ async fn cmd_cc(
     }
 
     // Auto-restore session
-    auto_restore_session(&ctx.data().shared, ctx.channel_id()).await;
+    auto_restore_session(&ctx.data().shared, ctx.channel_id(), ctx.serenity_context()).await;
 
     // Check session exists
     let has_session = {
@@ -1379,6 +1398,11 @@ async fn handle_text_message(
         data.cancel_tokens.insert(channel_id, cancel_token.clone());
     }
 
+    // Notify webui: agent is now active
+    if let Some(ref sid) = session_id {
+        crate::services::webui::push_status_by_session(sid, "active");
+    }
+
     // Create channel for streaming
     let (tx, rx) = mpsc::channel();
 
@@ -1407,6 +1431,7 @@ async fn handle_text_message(
     let http = ctx.http.clone();
     let shared_owned = shared.clone();
     let user_text_owned = user_text.to_string();
+    let session_id_for_status = session_id.clone();
     tokio::spawn(async move {
         const SPINNER: &[&str] = &[
             "⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏",
@@ -1550,6 +1575,11 @@ async fn handle_text_message(
         {
             let mut data = shared_owned.lock().await;
             data.cancel_tokens.remove(&channel_id);
+        }
+
+        // Notify webui: agent is now waiting
+        if let Some(ref sid) = session_id_for_status {
+            crate::services::webui::push_status_by_session(sid, "waiting");
         }
 
         // Remove hourglass reaction
@@ -1851,10 +1881,21 @@ pub async fn send_file_to_channel(
 async fn auto_restore_session(
     shared: &Arc<Mutex<SharedData>>,
     channel_id: ChannelId,
+    serenity_ctx: &serenity::prelude::Context,
 ) {
+    {
+        let data = shared.lock().await;
+        if data.sessions.contains_key(&channel_id) {
+            return;
+        }
+    }
+
+    // Resolve channel/category before taking the lock for mutation
+    let (ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
+
     let mut data = shared.lock().await;
     if data.sessions.contains_key(&channel_id) {
-        return;
+        return; // Double-check after re-acquiring lock
     }
 
     let channel_key = channel_id.get().to_string();
@@ -1867,6 +1908,8 @@ async fn auto_restore_session(
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
                 cleared: false,
+                channel_name: ch_name,
+                category_name: cat_name,
             });
             session.current_path = Some(last_path.clone());
             if let Some((session_data, _)) = existing {
@@ -1919,6 +1962,102 @@ fn load_existing_session(current_path: &str) -> Option<(SessionData, std::time::
     matching_session
 }
 
+/// Resolve the channel name and parent category name for a Discord channel.
+async fn resolve_channel_category(
+    ctx: &serenity::prelude::Context,
+    channel_id: serenity::model::id::ChannelId,
+) -> (Option<String>, Option<String>) {
+    let Ok(channel) = channel_id.to_channel(&ctx.http).await else {
+        return (None, None);
+    };
+    let serenity::model::channel::Channel::Guild(gc) = channel else {
+        return (None, None);
+    };
+    let ch_name = Some(gc.name.clone());
+    let cat_name = if let Some(parent_id) = gc.parent_id {
+        if let Ok(parent_ch) = parent_id.to_channel(&ctx.http).await {
+            match parent_ch {
+                serenity::model::channel::Channel::Guild(cat) => Some(cat.name.clone()),
+                _ => {
+                    let ts = chrono::Local::now().format("%H:%M:%S");
+                    println!("  [{ts}] ⚠ Category channel {parent_id} is not a Guild channel for #{}", gc.name);
+                    None
+                }
+            }
+        } else {
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ⚠ Failed to resolve category {parent_id} for #{}", gc.name);
+            None
+        }
+    } else {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!("  [{ts}] ⚠ No parent_id for #{}", gc.name);
+        None
+    };
+    (ch_name, cat_name)
+}
+
+/// On startup, resolve category names for all known channels and update session files.
+async fn migrate_session_categories(
+    ctx: &serenity::prelude::Context,
+    shared: &Arc<Mutex<SharedData>>,
+) {
+    let sessions_dir = match ai_screen::ai_sessions_dir() {
+        Some(d) if d.exists() => d,
+        _ => return,
+    };
+
+    // Collect channel IDs from bot_settings.last_sessions
+    let channel_keys: Vec<(String, String)> = {
+        let data = shared.lock().await;
+        data.settings.last_sessions.iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    };
+
+    let mut updated = 0usize;
+    for (channel_key, session_path) in &channel_keys {
+        let Ok(cid) = channel_key.parse::<u64>() else { continue };
+        let channel_id = serenity::model::id::ChannelId::new(cid);
+        let (ch_name, cat_name) = resolve_channel_category(ctx, channel_id).await;
+        if ch_name.is_none() && cat_name.is_none() {
+            continue;
+        }
+
+        // Find the session file for this channel's path
+        let existing = load_existing_session(session_path);
+        if let Some((session_data, _)) = existing {
+            let file_path = sessions_dir.join(format!("{}.json", session_data.session_id));
+            if file_path.exists() {
+                // Read, update category fields, write back
+                if let Ok(content) = fs::read_to_string(&file_path) {
+                    if let Ok(mut val) = serde_json::from_str::<serde_json::Value>(&content) {
+                        if let Some(obj) = val.as_object_mut() {
+                            if let Some(ref name) = ch_name {
+                                obj.insert("discord_channel_name".to_string(),
+                                    serde_json::Value::String(name.clone()));
+                            }
+                            if let Some(ref cat) = cat_name {
+                                obj.insert("discord_category_name".to_string(),
+                                    serde_json::Value::String(cat.clone()));
+                            }
+                            if let Ok(json) = serde_json::to_string_pretty(&val) {
+                                let _ = fs::write(&file_path, json);
+                                updated += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if updated > 0 {
+        let ts = chrono::Local::now().format("%H:%M:%S");
+        println!("  [{ts}] ✓ Updated {updated} session(s) with channel/category info");
+    }
+}
+
 /// Save session to file in the ai_sessions directory
 fn save_session_to_file(session: &DiscordSession, current_path: &str) {
     let Some(ref session_id) = session.session_id else {
@@ -1946,13 +2085,6 @@ fn save_session_to_file(session: &DiscordSession, current_path: &str) {
         return;
     }
 
-    let session_data = SessionData {
-        session_id: session_id.clone(),
-        history: saveable_history,
-        current_path: current_path.to_string(),
-        created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
-    };
-
     let file_path = sessions_dir.join(format!("{}.json", session_id));
 
     if let Some(parent) = file_path.parent() {
@@ -1960,6 +2092,34 @@ fn save_session_to_file(session: &DiscordSession, current_path: &str) {
             return;
         }
     }
+
+    // Preserve existing category/channel names from the file when in-memory values are None
+    let (effective_channel_name, effective_category_name) = if session.channel_name.is_none() || session.category_name.is_none() {
+        if let Ok(content) = fs::read_to_string(&file_path) {
+            if let Ok(existing) = serde_json::from_str::<SessionData>(&content) {
+                (
+                    session.channel_name.clone().or(existing.discord_channel_name),
+                    session.category_name.clone().or(existing.discord_category_name),
+                )
+            } else {
+                (session.channel_name.clone(), session.category_name.clone())
+            }
+        } else {
+            (session.channel_name.clone(), session.category_name.clone())
+        }
+    } else {
+        (session.channel_name.clone(), session.category_name.clone())
+    };
+
+    let session_data = SessionData {
+        session_id: session_id.clone(),
+        history: saveable_history,
+        current_path: current_path.to_string(),
+        created_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string(),
+        discord_channel_id: None,
+        discord_channel_name: effective_channel_name,
+        discord_category_name: effective_category_name,
+    };
 
     if let Ok(json) = serde_json::to_string_pretty(&session_data) {
         let _ = fs::write(file_path, json);
