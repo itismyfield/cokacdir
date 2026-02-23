@@ -48,6 +48,8 @@ fn print_help() {
     println!("    --discord-sendfile <PATH> --channel <ID> --key <HASH>");
     println!("                            Send file via Discord bot (internal use, HASH = token hash)");
     println!("    --webui [PORT]          Start web UI server (default port: 3333)");
+    println!("    --ismcptool <TOOL>...    Check if MCP tool(s) are registered in .claude/settings.json (CWD)");
+    println!("    --addmcptool <TOOL>...   Add MCP tool permission(s) to .claude/settings.json (CWD)");
     println!();
     println!("HOMEPAGE: https://cokacdir.cokac.com");
 }
@@ -69,34 +71,134 @@ fn handle_base64(encoded: &str) {
 }
 
 fn handle_sendfile(path: &str, chat_id: i64, hash_key: &str) {
-    use teloxide::prelude::*;
-    use crate::services::telegram::resolve_token_by_hash;
-    let token = match resolve_token_by_hash(hash_key) {
-        Some(t) => t,
-        None => {
-            eprintln!("Error: no bot token found for hash key: {}", hash_key);
+    use md5::{Md5, Digest};
+
+    let file_path = std::path::Path::new(path);
+    if !file_path.exists() {
+        eprintln!("Error: file not found: {}", path);
+        std::process::exit(1);
+    }
+
+    let abs_path = match file_path.canonicalize() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(e) => {
+            eprintln!("Error: failed to resolve path: {}", e);
             std::process::exit(1);
         }
     };
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-    rt.block_on(async {
-        let bot = Bot::new(&token);
-        let file_path = std::path::Path::new(path);
-        if !file_path.exists() {
-            eprintln!("Error: file not found: {}", path);
+
+    // Create upload queue directory
+    let queue_dir = match dirs::home_dir() {
+        Some(h) => h.join(".cokacdir").join("upload_queue"),
+        None => {
+            eprintln!("Error: cannot determine home directory");
             std::process::exit(1);
         }
-        match bot.send_document(
-            ChatId(chat_id),
-            teloxide::types::InputFile::file(file_path),
-        ).await {
-            Ok(_) => println!("File sent: {}", path),
-            Err(e) => {
-                eprintln!("Failed to send file: {}", e);
-                std::process::exit(1);
-            }
-        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&queue_dir) {
+        eprintln!("Error: failed to create queue directory: {}", e);
+        std::process::exit(1);
+    }
+
+    // Generate queue filename: YYYY-MM-DD-hh-mm-ii-ss-mmm.{MD5}.queue
+    let now = chrono::Local::now();
+    let timestamp = now.format("%Y-%m-%d-%H-%M-%S").to_string();
+    let millis = now.format("%3f").to_string();
+    let md5_hash = format!("{:x}", Md5::digest(abs_path.as_bytes()));
+    let filename = format!("{}-{}.{}.queue", timestamp, millis, md5_hash);
+
+    // Write queue file
+    let queue_content = serde_json::json!({
+        "path": abs_path,
+        "chat_id": chat_id,
+        "key": hash_key,
     });
+    let queue_path = queue_dir.join(&filename);
+    match std::fs::write(&queue_path, queue_content.to_string()) {
+        Ok(_) => println!("Queued for upload: {}", abs_path),
+        Err(e) => {
+            eprintln!("Error: failed to write queue file: {}", e);
+            std::process::exit(1);
+        }
+    }
+}
+
+fn handle_ismcptool(tool_names: &[String]) {
+    let cwd = std::env::current_dir().expect("Cannot determine current directory");
+    let settings_path = cwd.join(".claude").join("settings.json");
+
+    let allow_list: Vec<String> = if settings_path.exists() {
+        let content = std::fs::read_to_string(&settings_path)
+            .expect("Failed to read .claude/settings.json");
+        let json: serde_json::Value = serde_json::from_str(&content)
+            .expect("Failed to parse .claude/settings.json");
+        json.get("permissions")
+            .and_then(|p| p.get("allow"))
+            .and_then(|a| a.as_array())
+            .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    for tool_name in tool_names {
+        if allow_list.iter().any(|v| v == tool_name) {
+            println!("{}: registered", tool_name);
+        } else {
+            println!("{}: not registered", tool_name);
+        }
+    }
+}
+
+fn handle_addmcptool(tool_names: &[String]) {
+    let cwd = std::env::current_dir().expect("Cannot determine current directory");
+    let settings_path = cwd.join(".claude").join("settings.json");
+
+    // Read existing file or start with empty object
+    let mut json: serde_json::Value = if settings_path.exists() {
+        let content = std::fs::read_to_string(&settings_path)
+            .expect("Failed to read .claude/settings.json");
+        serde_json::from_str(&content)
+            .expect("Failed to parse .claude/settings.json")
+    } else {
+        let _ = std::fs::create_dir_all(settings_path.parent().unwrap());
+        serde_json::json!({})
+    };
+
+    let obj = json.as_object_mut().expect("settings.json is not a JSON object");
+
+    // Add tool to permissions.allow array
+    let permissions = obj.entry("permissions")
+        .or_insert_with(|| serde_json::json!({}));
+    let allow = permissions.as_object_mut()
+        .expect("permissions is not an object")
+        .entry("allow")
+        .or_insert_with(|| serde_json::json!([]));
+    let allow_arr = allow.as_array_mut().expect("allow is not an array");
+
+    // Add each tool, skipping duplicates
+    let mut added = Vec::new();
+    let mut skipped = Vec::new();
+    for tool_name in tool_names {
+        let already_exists = allow_arr.iter().any(|v| v.as_str() == Some(tool_name.as_str()));
+        if already_exists {
+            skipped.push(tool_name.as_str());
+        } else {
+            allow_arr.push(serde_json::json!(tool_name));
+            added.push(tool_name.as_str());
+        }
+    }
+
+    // Save
+    let content = serde_json::to_string_pretty(&json).expect("Failed to serialize JSON");
+    std::fs::write(&settings_path, content).expect("Failed to write .claude/settings.json");
+
+    for name in &added {
+        println!("Added: {}", name);
+    }
+    for name in &skipped {
+        println!("Already registered: {}", name);
+    }
 }
 
 fn print_version() {
@@ -421,6 +523,32 @@ fn main() -> io::Result<()> {
                         eprintln!("Usage: cokacdir --sendfile <PATH> --chat <ID> --key <HASH>");
                     }
                 }
+                return Ok(());
+            }
+            "--ismcptool" => {
+                let tool_names: Vec<String> = args[i + 1..].iter()
+                    .take_while(|a| !a.starts_with('-'))
+                    .cloned()
+                    .collect();
+                if tool_names.is_empty() {
+                    eprintln!("Error: --ismcptool requires at least one tool name");
+                    eprintln!("Usage: cokacdir --ismcptool \"TOOL1\" \"TOOL2\" ...");
+                    return Ok(());
+                }
+                handle_ismcptool(&tool_names);
+                return Ok(());
+            }
+            "--addmcptool" => {
+                let tool_names: Vec<String> = args[i + 1..].iter()
+                    .take_while(|a| !a.starts_with('-'))
+                    .cloned()
+                    .collect();
+                if tool_names.is_empty() {
+                    eprintln!("Error: --addmcptool requires at least one tool name");
+                    eprintln!("Usage: cokacdir --addmcptool \"TOOL1\" \"TOOL2\" ...");
+                    return Ok(());
+                }
+                handle_addmcptool(&tool_names);
                 return Ok(());
             }
             "--design" => {

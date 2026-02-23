@@ -923,7 +923,7 @@ Keep responses concise and terminal-friendly.",
 
             if let Err(e) = result {
                 debug_log(&format!("submit:thread: ERROR from execute_command_streaming: {}", e));
-                let send_result = tx.send(StreamMessage::Error { message: e });
+                let send_result = tx.send(StreamMessage::Error { message: e, stdout: String::new(), stderr: String::new(), exit_code: None });
                 debug_log(&format!("submit:thread: Error message send result: {:?}", send_result.is_ok()));
             } else {
                 debug_log("submit:thread: execute_command_streaming completed successfully");
@@ -1018,7 +1018,7 @@ Keep responses concise and terminal-friendly.",
                     processing_done = true;
                     has_new_content = true;
                 }
-                StreamMessage::Error { message } => {
+                StreamMessage::Error { message, .. } => {
                     self.add_to_history(HistoryItem {
                         item_type: HistoryType::Error,
                         content: message,

@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::path::Path;
 use std::fs;
 
@@ -12,6 +12,42 @@ use sha2::{Sha256, Digest};
 
 use crate::services::claude::{self, CancelToken, StreamMessage, DEFAULT_ALLOWED_TOOLS};
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType, SessionData};
+
+/// Global debug log flag for Telegram API calls
+static TG_DEBUG: AtomicBool = AtomicBool::new(false);
+
+/// Log Telegram API call result to ~/.cokacdir/debug/ file
+fn tg_debug<T, E: std::fmt::Display>(name: &str, result: &Result<T, E>) {
+    if !TG_DEBUG.load(Ordering::Relaxed) {
+        return;
+    }
+    let Some(debug_dir) = dirs::home_dir().map(|h| h.join(".cokacdir").join("debug")) else {
+        return;
+    };
+    let _ = fs::create_dir_all(&debug_dir);
+    let date = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let log_path = debug_dir.join(format!("{}.log", date));
+    let ts = chrono::Local::now().format("%H:%M:%S%.3f");
+    let status = match result {
+        Ok(_) => "✓".to_string(),
+        Err(e) => format!("✗ {e}"),
+    };
+    let line = format!("[{ts}] {name}: {status}\n");
+    let _ = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log_path)
+        .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+}
+
+/// Wrap a Telegram API call to log its result in debug mode
+macro_rules! tg {
+    ($name:expr, $fut:expr) => {{
+        let r = $fut;
+        tg_debug($name, &r);
+        r
+    }};
+}
 
 /// Per-chat session state
 struct ChatSession {
@@ -67,6 +103,8 @@ struct SharedData {
     stop_message_ids: HashMap<ChatId, teloxide::types::MessageId>,
     /// Per-chat timestamp of the last Telegram API call (for rate limiting)
     api_timestamps: HashMap<ChatId, tokio::time::Instant>,
+    /// Telegram API polling interval in milliseconds (shared across all bots)
+    polling_time_ms: u64,
 }
 
 type SharedState = Arc<Mutex<SharedData>>;
@@ -259,8 +297,10 @@ pub async fn run_bot(token: &str) {
         teloxide::types::BotCommand::new("availabletools", "List all available tools"),
         teloxide::types::BotCommand::new("allowedtools", "Show currently allowed tools"),
         teloxide::types::BotCommand::new("allowed", "Add/remove tool (+name / -name)"),
+        teloxide::types::BotCommand::new("setpollingtime", "Set API polling interval (ms)"),
+        teloxide::types::BotCommand::new("debug", "Toggle API debug logging"),
     ];
-    if let Err(e) = bot.set_my_commands(commands).await {
+    if let Err(e) = tg!("set_my_commands", bot.set_my_commands(commands).await) {
         println!("  ⚠ Failed to set bot commands: {e}");
     }
 
@@ -269,12 +309,16 @@ pub async fn run_bot(token: &str) {
         None => println!("  ⚠ No owner registered — first user will be registered as owner"),
     }
 
+    let app_settings = crate::config::Settings::load();
+    let polling_time_ms = app_settings.telegram_polling_time.max(2500);
+
     let state: SharedState = Arc::new(Mutex::new(SharedData {
         sessions: HashMap::new(),
         settings: bot_settings,
         cancel_tokens: HashMap::new(),
         stop_message_ids: HashMap::new(),
         api_timestamps: HashMap::new(),
+        polling_time_ms,
     }));
 
     println!("  ✓ Bot connected — Listening for messages");
@@ -383,8 +427,8 @@ async fn handle_message(
                     };
                     if ai_busy {
                         shared_rate_limit_wait(&state, chat_id).await;
-                        bot.send_message(chat_id, "AI request in progress. Use /stop to cancel.")
-                            .await?;
+                        tg!("send_message", bot.send_message(chat_id, "AI request in progress. Use /stop to cancel.")
+                            .await)?;
                     } else {
                         handle_text_message(&bot, chat_id, text, &state).await?;
                     }
@@ -459,8 +503,8 @@ async fn handle_message(
         if data.cancel_tokens.contains_key(&chat_id) {
             drop(data);
             shared_rate_limit_wait(&state, chat_id).await;
-            bot.send_message(chat_id, "AI request in progress. Use /stop to cancel.")
-                .await?;
+            tg!("send_message", bot.send_message(chat_id, "AI request in progress. Use /stop to cancel.")
+                .await)?;
             return Ok(());
         }
     }
@@ -493,13 +537,18 @@ async fn handle_message(
     } else if text.starts_with("/allowedtools") {
         println!("  [{timestamp}] ◀ [{user_name}] /allowedtools");
         handle_allowedtools_command(&bot, chat_id, &state).await?;
+    } else if text.starts_with("/setpollingtime") {
+        println!("  [{timestamp}] ◀ [{user_name}] /setpollingtime {}", text.strip_prefix("/setpollingtime").unwrap_or("").trim());
+        handle_setpollingtime_command(&bot, chat_id, &text, &state).await?;
+    } else if text.starts_with("/debug") {
+        println!("  [{timestamp}] ◀ [{user_name}] /debug");
+        handle_debug_command(&bot, chat_id, &state).await?;
     } else if text.starts_with("/allowed") {
         println!("  [{timestamp}] ◀ [{user_name}] /allowed {}", text.strip_prefix("/allowed").unwrap_or("").trim());
         handle_allowed_command(&bot, chat_id, &text, &state, token).await?;
     } else if text.starts_with('!') {
         println!("  [{timestamp}] ◀ [{user_name}] Shell: {preview}");
         handle_shell_command(&bot, chat_id, &text, &state).await?;
-        println!("  [{timestamp}] ▶ [{user_name}] Shell done");
     } else if text.starts_with(';') {
         let stripped = text.strip_prefix(';').unwrap_or(&text).trim().to_string();
         if stripped.is_empty() {
@@ -550,6 +599,7 @@ AI can read, edit, and run commands in your session.
 <code>/allowedtools</code> — Show currently allowed tools
 <code>/allowed +name</code> — Add tool (e.g. <code>/allowed +Bash</code>)
 <code>/allowed -name</code> — Remove tool
+<code>/allowed +a -b +c</code> — Multiple at once
 
 <b>Group Chat</b>
 <code>;</code><i>message</i> — Send message to AI
@@ -557,12 +607,18 @@ AI can read, edit, and run commands in your session.
 <code>/public on</code> — Allow all members to use bot
 <code>/public off</code> — Owner only (default)
 
+<b>Settings</b>
+<code>/setpollingtime &lt;ms&gt;</code> — Set API polling interval
+  Too low may cause Telegram API rate limits.
+  Minimum 2500ms, recommended 3000ms+.
+<code>/debug</code> — Toggle API debug logging
+
 <code>/help</code> — Show this help";
 
     shared_rate_limit_wait(state, chat_id).await;
-    bot.send_message(chat_id, help)
+    tg!("send_message", bot.send_message(chat_id, help)
         .parse_mode(ParseMode::Html)
-        .await?;
+        .await)?;
 
     Ok(())
 }
@@ -582,8 +638,8 @@ async fn handle_start_command(
         // Create random workspace directory
         let Some(home) = dirs::home_dir() else {
             shared_rate_limit_wait(state, chat_id).await;
-            bot.send_message(chat_id, "Error: cannot determine home directory.")
-                .await?;
+            tg!("send_message", bot.send_message(chat_id, "Error: cannot determine home directory.")
+                .await)?;
             return Ok(());
         };
         let workspace_dir = home.join(".cokacdir").join("workspace");
@@ -596,8 +652,8 @@ async fn handle_start_command(
         let new_dir = workspace_dir.join(&random_name);
         if let Err(e) = fs::create_dir_all(&new_dir) {
             shared_rate_limit_wait(state, chat_id).await;
-            bot.send_message(chat_id, format!("Error: failed to create workspace: {}", e))
-                .await?;
+            tg!("send_message", bot.send_message(chat_id, format!("Error: failed to create workspace: {}", e))
+                .await)?;
             return Ok(());
         }
         new_dir.display().to_string()
@@ -616,8 +672,8 @@ async fn handle_start_command(
         let path = Path::new(&expanded);
         if !path.exists() || !path.is_dir() {
             shared_rate_limit_wait(state, chat_id).await;
-            bot.send_message(chat_id, format!("Error: '{}' is not a valid directory.", expanded))
-                .await?;
+            tg!("send_message", bot.send_message(chat_id, format!("Error: '{}' is not a valid directory.", expanded))
+                .await)?;
             return Ok(());
         }
         path.canonicalize()
@@ -725,8 +781,8 @@ async fn handle_clear_command(
     }
 
     shared_rate_limit_wait(state, chat_id).await;
-    bot.send_message(chat_id, "Session cleared.")
-        .await?;
+    tg!("send_message", bot.send_message(chat_id, "Session cleared.")
+        .await)?;
 
     Ok(())
 }
@@ -744,8 +800,8 @@ async fn handle_pwd_command(
 
     shared_rate_limit_wait(state, chat_id).await;
     match current_path {
-        Some(path) => bot.send_message(chat_id, &path).await?,
-        None => bot.send_message(chat_id, "No active session. Use /start <path> first.").await?,
+        Some(path) => tg!("send_message", bot.send_message(chat_id, &path).await)?,
+        None => tg!("send_message", bot.send_message(chat_id, "No active session. Use /start <path> first.").await)?,
     };
 
     Ok(())
@@ -771,7 +827,7 @@ async fn handle_stop_command(
 
             // Send immediate feedback to user
             shared_rate_limit_wait(state, chat_id).await;
-            let stop_msg = bot.send_message(chat_id, "Stopping...").await?;
+            let stop_msg = tg!("send_message", bot.send_message(chat_id, "Stopping...").await)?;
 
             // Store the stop message ID so the polling loop can update it later
             {
@@ -798,8 +854,8 @@ async fn handle_stop_command(
         }
         None => {
             shared_rate_limit_wait(state, chat_id).await;
-            bot.send_message(chat_id, "No active request to stop.")
-                .await?;
+            tg!("send_message", bot.send_message(chat_id, "No active request to stop.")
+                .await)?;
         }
     }
 
@@ -817,8 +873,8 @@ async fn handle_down_command(
 
     if file_path.is_empty() {
         shared_rate_limit_wait(state, chat_id).await;
-        bot.send_message(chat_id, "Usage: /down <filepath>\nExample: /down /home/kst/file.txt")
-            .await?;
+        tg!("send_message", bot.send_message(chat_id, "Usage: /down <filepath>\nExample: /down /home/kst/file.txt")
+            .await)?;
         return Ok(());
     }
 
@@ -834,8 +890,8 @@ async fn handle_down_command(
             Some(base) => format!("{}/{}", base.trim_end_matches('/'), file_path),
             None => {
                 shared_rate_limit_wait(state, chat_id).await;
-                bot.send_message(chat_id, "No active session. Use absolute path or /start <path> first.")
-                    .await?;
+                tg!("send_message", bot.send_message(chat_id, "No active session. Use absolute path or /start <path> first.")
+                    .await)?;
                 return Ok(());
             }
         }
@@ -844,18 +900,18 @@ async fn handle_down_command(
     let path = Path::new(&resolved_path);
     if !path.exists() {
         shared_rate_limit_wait(state, chat_id).await;
-        bot.send_message(chat_id, &format!("File not found: {}", resolved_path)).await?;
+        tg!("send_message", bot.send_message(chat_id, &format!("File not found: {}", resolved_path)).await)?;
         return Ok(());
     }
     if !path.is_file() {
         shared_rate_limit_wait(state, chat_id).await;
-        bot.send_message(chat_id, &format!("Not a file: {}", resolved_path)).await?;
+        tg!("send_message", bot.send_message(chat_id, &format!("Not a file: {}", resolved_path)).await)?;
         return Ok(());
     }
 
     shared_rate_limit_wait(state, chat_id).await;
-    bot.send_document(chat_id, teloxide::types::InputFile::file(path))
-        .await?;
+    tg!("send_document", bot.send_document(chat_id, teloxide::types::InputFile::file(path))
+        .await)?;
 
     Ok(())
 }
@@ -875,8 +931,8 @@ async fn handle_file_upload(
 
     let Some(save_dir) = current_path else {
         shared_rate_limit_wait(state, chat_id).await;
-        bot.send_message(chat_id, "No active session. Use /start <path> first.")
-            .await?;
+        tg!("send_message", bot.send_message(chat_id, "No active session. Use /start <path> first.")
+            .await)?;
         return Ok(());
     };
 
@@ -898,20 +954,20 @@ async fn handle_file_upload(
 
     // Download file from Telegram via HTTP
     shared_rate_limit_wait(state, chat_id).await;
-    let file = bot.get_file(&file_id).await?;
+    let file = tg!("get_file", bot.get_file(&file_id).await)?;
     let url = format!("https://api.telegram.org/file/bot{}/{}", bot.token(), file.path);
     let buf = match reqwest::get(&url).await {
         Ok(resp) => match resp.bytes().await {
             Ok(bytes) => bytes,
             Err(e) => {
                 shared_rate_limit_wait(state, chat_id).await;
-                bot.send_message(chat_id, &format!("Download failed: {}", e)).await?;
+                tg!("send_message", bot.send_message(chat_id, &format!("Download failed: {}", e)).await)?;
                 return Ok(());
             }
         },
         Err(e) => {
             shared_rate_limit_wait(state, chat_id).await;
-            bot.send_message(chat_id, &format!("Download failed: {}", e)).await?;
+            tg!("send_message", bot.send_message(chat_id, &format!("Download failed: {}", e)).await)?;
             return Ok(());
         }
     };
@@ -926,11 +982,11 @@ async fn handle_file_upload(
         Ok(_) => {
             let msg_text = format!("Saved: {}\n({} bytes)", dest.display(), file_size);
             shared_rate_limit_wait(state, chat_id).await;
-            bot.send_message(chat_id, &msg_text).await?;
+            tg!("send_message", bot.send_message(chat_id, &msg_text).await)?;
         }
         Err(e) => {
             shared_rate_limit_wait(state, chat_id).await;
-            bot.send_message(chat_id, &format!("Failed to save file: {}", e)).await?;
+            tg!("send_message", bot.send_message(chat_id, &format!("Failed to save file: {}", e)).await)?;
             return Ok(());
         }
     }
@@ -955,7 +1011,14 @@ async fn handle_file_upload(
     Ok(())
 }
 
-/// Handle !command - execute shell command directly
+/// Shell command output message type
+enum ShellOutput {
+    Line(String),
+    Done { exit_code: i32 },
+    Error(String),
+}
+
+/// Handle !command - execute shell command directly with lock/stop/streaming support
 async fn handle_shell_command(
     bot: &Bot,
     chat_id: ChatId,
@@ -966,8 +1029,8 @@ async fn handle_shell_command(
 
     if cmd_str.is_empty() {
         shared_rate_limit_wait(state, chat_id).await;
-        bot.send_message(chat_id, "Usage: !<command>\nExample: !mkdir /home/kst/testcode")
-            .await?;
+        tg!("send_message", bot.send_message(chat_id, "Usage: !<command>\nExample: !mkdir /home/kst/testcode")
+            .await)?;
         return Ok(());
     }
 
@@ -983,11 +1046,29 @@ async fn handle_shell_command(
             })
     };
 
+    // Send placeholder message
+    let cmd_display = cmd_str.to_string();
+    shared_rate_limit_wait(state, chat_id).await;
+    let placeholder = tg!("send_message", bot.send_message(chat_id, format!("!{}에 대해서 처리중입니다.", &cmd_display)).await)?;
+    let placeholder_msg_id = placeholder.id;
+
+    // Register cancel token (lock) — must be AFTER placeholder send succeeds,
+    // otherwise a failed send leaves the chat permanently locked.
+    let cancel_token = Arc::new(CancelToken::new());
+    {
+        let mut data = state.lock().await;
+        data.cancel_tokens.insert(chat_id, cancel_token.clone());
+    }
+
+    // Create channel
+    let (tx, rx) = mpsc::channel();
+
     let cmd_owned = cmd_str.to_string();
     let working_dir_clone = working_dir.clone();
+    let cancel_token_clone = cancel_token.clone();
 
-    // Run shell command in blocking thread with stdin closed and timeout
-    let result = tokio::task::spawn_blocking(move || {
+    // Spawn blocking thread for shell command execution
+    tokio::task::spawn_blocking(move || {
         let child = std::process::Command::new("bash")
             .args(["-c", &cmd_owned])
             .current_dir(&working_dir_clone)
@@ -996,39 +1077,253 @@ async fn handle_shell_command(
             .stderr(std::process::Stdio::piped())
             .spawn();
 
-        match child {
-            Ok(child) => child.wait_with_output(),
-            Err(e) => Err(e),
+        let mut child = match child {
+            Ok(c) => c,
+            Err(e) => {
+                let _ = tx.send(ShellOutput::Error(format!("Failed to execute: {}", e)));
+                return;
+            }
+        };
+
+        // Store PID for /stop kill
+        if let Ok(mut guard) = cancel_token_clone.child_pid.lock() {
+            *guard = Some(child.id());
         }
-    }).await;
 
-    let response = match result {
-        Ok(Ok(output)) => {
-            let stdout = String::from_utf8_lossy(&output.stdout);
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let exit_code = output.status.code().unwrap_or(-1);
-
-            let mut parts = Vec::new();
-
-            if !stdout.is_empty() {
-                parts.push(format!("<pre>{}</pre>", html_escape(stdout.trim_end())));
+        // Read stderr in a separate thread
+        let stderr_handle = child.stderr.take();
+        let stderr_thread = std::thread::spawn(move || {
+            let mut buf = String::new();
+            if let Some(se) = stderr_handle {
+                use std::io::BufRead;
+                for line in std::io::BufReader::new(se).lines().flatten() {
+                    buf.push_str(&line);
+                    buf.push('\n');
+                }
             }
-            if !stderr.is_empty() {
-                parts.push(format!("stderr:\n<pre>{}</pre>", html_escape(stderr.trim_end())));
-            }
-            if parts.is_empty() {
-                parts.push(format!("(exit code: {})", exit_code));
-            } else if exit_code != 0 {
-                parts.push(format!("(exit code: {})", exit_code));
-            }
+            buf
+        });
 
-            parts.join("\n")
+        // Read stdout line by line with cancel checks
+        if let Some(stdout) = child.stdout.take() {
+            use std::io::BufRead;
+            for line in std::io::BufReader::new(stdout).lines().flatten() {
+                if cancel_token_clone.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return;
+                }
+                let _ = tx.send(ShellOutput::Line(line));
+            }
         }
-        Ok(Err(e)) => format!("Failed to execute: {}", html_escape(&e.to_string())),
-        Err(e) => format!("Task error: {}", html_escape(&e.to_string())),
-    };
 
-    send_long_message(bot, chat_id, &response, Some(ParseMode::Html), state).await?;
+        let stderr_output = stderr_thread.join().unwrap_or_default();
+        if !stderr_output.is_empty() {
+            let _ = tx.send(ShellOutput::Line(format!("[stderr]\n{}", stderr_output.trim_end())));
+        }
+
+        let status = child.wait();
+        let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
+        let _ = tx.send(ShellOutput::Done { exit_code });
+    });
+
+    // Spawn polling loop (same pattern as AI streaming)
+    let bot_owned = bot.clone();
+    let state_owned = state.clone();
+    let cmd_display_owned = cmd_display.clone();
+    tokio::spawn(async move {
+        const SPINNER: &[&str] = &[
+            "🕐 P",           "🕑 Pr",          "🕒 Pro",
+            "🕓 Proc",        "🕔 Proce",       "🕕 Proces",
+            "🕖 Process",     "🕗 Processi",    "🕘 Processin",
+            "🕙 Processing",  "🕚 Processing.", "🕛 Processing..",
+        ];
+        let mut full_output = String::new();
+        let mut last_edit_text = String::new();
+        let mut done = false;
+        let mut cancelled = false;
+        let mut spin_idx: usize = 0;
+        let mut exit_code: i32 = -1;
+        let mut spawn_error: Option<String> = None;
+
+        let polling_time_ms = {
+            let data = state_owned.lock().await;
+            data.polling_time_ms
+        };
+        let mut queue_done = false;
+        let mut response_rendered = false;
+        while !done || !queue_done {
+            // Check cancel
+            if cancel_token.cancelled.load(Ordering::Relaxed) {
+                if !done { cancelled = true; }
+                break;
+            }
+
+            tokio::time::sleep(tokio::time::Duration::from_millis(polling_time_ms)).await;
+
+            if cancel_token.cancelled.load(Ordering::Relaxed) {
+                if !done { cancelled = true; }
+                break;
+            }
+
+            // Drain channel
+            if !done {
+                loop {
+                    match rx.try_recv() {
+                        Ok(msg) => match msg {
+                            ShellOutput::Line(line) => {
+                                if !full_output.is_empty() {
+                                    full_output.push('\n');
+                                }
+                                full_output.push_str(&line);
+                            }
+                            ShellOutput::Done { exit_code: code } => {
+                                exit_code = code;
+                                done = true;
+                            }
+                            ShellOutput::Error(e) => {
+                                spawn_error = Some(e);
+                                done = true;
+                            }
+                        },
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Update placeholder with spinner
+                if !done {
+                    let indicator = SPINNER[spin_idx % SPINNER.len()];
+                    spin_idx += 1;
+
+                    let display_text = format!("!{}에 대해서 처리중입니다.\n\n{}", cmd_display_owned, indicator);
+
+                    if display_text != last_edit_text {
+                        shared_rate_limit_wait(&state_owned, chat_id).await;
+                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &display_text).await);
+                        last_edit_text = display_text;
+                    } else {
+                        shared_rate_limit_wait(&state_owned, chat_id).await;
+                        let _ = tg!("send_chat_action", bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await);
+                    }
+                }
+            }
+
+            // Render final result once
+            if done && !response_rendered {
+                response_rendered = true;
+
+                if let Some(err) = &spawn_error {
+                    // Spawn error - just show error message
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, err).await);
+                } else {
+                    if !full_output.trim().is_empty() {
+                        let file_content = format!("$ {}\n\n{}", cmd_display_owned, full_output);
+                        let content_bytes = file_content.len();
+
+                        if content_bytes <= 4000 {
+                            // Short output: update placeholder with completion + result in one call
+                            let combined = format!("!{} 완료 (exit code: {})\n\n<pre>$ {}\n\n{}</pre>",
+                                cmd_display_owned, exit_code,
+                                html_escape(&cmd_display_owned), html_escape(full_output.trim()));
+                            shared_rate_limit_wait(&state_owned, chat_id).await;
+                            if let Err(_) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &combined)
+                                .parse_mode(ParseMode::Html)
+                                .await)
+                            {
+                                let fallback = format!("!{} 완료 (exit code: {})\n\n$ {}\n\n{}",
+                                    cmd_display_owned, exit_code, cmd_display_owned, full_output.trim());
+                                shared_rate_limit_wait(&state_owned, chat_id).await;
+                                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &fallback).await);
+                            }
+                        } else {
+                            // Long output: update placeholder + send as .txt file
+                            let final_msg = format!("!{} 완료 (exit code: {})", cmd_display_owned, exit_code);
+                            shared_rate_limit_wait(&state_owned, chat_id).await;
+                            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_msg).await);
+
+                            let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+                            let tmp_path = format!("/tmp/cokacdir_shell_{}_{}.txt", chat_id.0, timestamp);
+                            if std::fs::write(&tmp_path, &file_content).is_ok() {
+                                shared_rate_limit_wait(&state_owned, chat_id).await;
+                                let _ = tg!("send_document", bot_owned.send_document(
+                                    chat_id,
+                                    teloxide::types::InputFile::file(std::path::Path::new(&tmp_path)),
+                                ).await);
+                                let _ = std::fs::remove_file(&tmp_path);
+                            }
+                        }
+                    } else {
+                        // No output
+                        let final_msg = format!("!{} 완료 (exit code: {})", cmd_display_owned, exit_code);
+                        shared_rate_limit_wait(&state_owned, chat_id).await;
+                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_msg).await);
+                    }
+                }
+
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] ▶ Shell command completed: !{}", cmd_display_owned);
+            }
+
+            // Queue processing
+            let queued = process_upload_queue(&bot_owned, chat_id, &state_owned).await;
+            if done {
+                queue_done = !queued;
+            }
+        }
+
+        // Post-loop: cancel handling
+        if cancelled {
+            if let Ok(guard) = cancel_token.child_pid.lock() {
+                if let Some(pid) = *guard {
+                    #[cfg(unix)]
+                    unsafe {
+                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                    }
+                }
+            }
+
+            shared_rate_limit_wait(&state_owned, chat_id).await;
+            let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, "[Stopped]").await);
+
+            let stop_msg_id = {
+                let data = state_owned.lock().await;
+                data.stop_message_ids.get(&chat_id).cloned()
+            };
+            if let Some(msg_id) = stop_msg_id {
+                shared_rate_limit_wait(&state_owned, chat_id).await;
+                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
+            }
+
+            let ts = chrono::Local::now().format("%H:%M:%S");
+            println!("  [{ts}] ■ Shell command stopped: !{}", cmd_display_owned);
+
+            let mut data = state_owned.lock().await;
+            data.cancel_tokens.remove(&chat_id);
+            data.stop_message_ids.remove(&chat_id);
+            return;
+        }
+
+        // Clean up stop message if /stop raced with completion
+        {
+            let mut data = state_owned.lock().await;
+            if let Some(msg_id) = data.stop_message_ids.remove(&chat_id) {
+                drop(data);
+                shared_rate_limit_wait(&state_owned, chat_id).await;
+                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
+            }
+        }
+
+        // Release lock
+        {
+            let mut data = state_owned.lock().await;
+            data.cancel_tokens.remove(&chat_id);
+        }
+    });
 
     Ok(())
 }
@@ -1080,16 +1375,89 @@ async fn handle_allowedtools_command(
     msg.push_str(&format!("\n{} = destructive\nTotal: {}", risk_badge(true), tools.len()));
 
     shared_rate_limit_wait(state, chat_id).await;
-    bot.send_message(chat_id, &msg)
+    tg!("send_message", bot.send_message(chat_id, &msg)
         .parse_mode(ParseMode::Html)
-        .await?;
+        .await)?;
 
+    Ok(())
+}
+
+/// Handle /setpollingtime command - set Telegram API polling interval
+async fn handle_setpollingtime_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    text: &str,
+    state: &SharedState,
+) -> ResponseResult<()> {
+    let arg = text.strip_prefix("/setpollingtime").unwrap_or("").trim();
+
+    if arg.is_empty() {
+        let current = {
+            let data = state.lock().await;
+            data.polling_time_ms
+        };
+        shared_rate_limit_wait(state, chat_id).await;
+        tg!("send_message", bot.send_message(chat_id, format!("Current polling time: {}ms\nUsage: /setpollingtime <ms>\nMinimum: 2500ms", current))
+            .await)?;
+        return Ok(());
+    }
+
+    let value: u64 = match arg.parse() {
+        Ok(v) => v,
+        Err(_) => {
+            shared_rate_limit_wait(state, chat_id).await;
+            tg!("send_message", bot.send_message(chat_id, "Invalid number. Usage: /setpollingtime <ms>\nExample: /setpollingtime 3000")
+                .await)?;
+            return Ok(());
+        }
+    };
+
+    if value < 2500 {
+        shared_rate_limit_wait(state, chat_id).await;
+        tg!("send_message", bot.send_message(chat_id, "Minimum polling time is 2500ms.")
+            .await)?;
+        return Ok(());
+    }
+
+    // Update in-memory state
+    {
+        let mut data = state.lock().await;
+        data.polling_time_ms = value;
+    }
+
+    // Save to settings.json
+    if let Ok(mut app_settings) = crate::config::Settings::load_with_error() {
+        app_settings.telegram_polling_time = value;
+        let _ = app_settings.save();
+    }
+
+    shared_rate_limit_wait(state, chat_id).await;
+    tg!("send_message", bot.send_message(chat_id, format!("✅ Polling time set to {}ms", value))
+        .await)?;
+
+    Ok(())
+}
+
+/// Handle /debug command - toggle API debug logging
+async fn handle_debug_command(
+    bot: &Bot,
+    chat_id: ChatId,
+    state: &SharedState,
+) -> ResponseResult<()> {
+    let prev = TG_DEBUG.load(Ordering::Relaxed);
+    let next = !prev;
+    TG_DEBUG.store(next, Ordering::Relaxed);
+    let status = if next { "ON" } else { "OFF" };
+    shared_rate_limit_wait(state, chat_id).await;
+    tg!("send_message", bot.send_message(chat_id, format!("🔍 Debug logging: {status}"))
+        .await)?;
     Ok(())
 }
 
 /// Handle /allowed command - add/remove tools
 /// Usage: /allowed +toolname  (add)
 ///        /allowed -toolname  (remove)
+///        /allowed +tool1 -tool2 +tool3  (multiple)
 async fn handle_allowed_command(
     bot: &Bot,
     chat_id: ChatId,
@@ -1101,8 +1469,8 @@ async fn handle_allowed_command(
 
     if arg.is_empty() {
         shared_rate_limit_wait(state, chat_id).await;
-        bot.send_message(chat_id, "Usage:\n/allowed +toolname — Add a tool\n/allowed -toolname — Remove a tool\n/allowedtools — Show current list")
-            .await?;
+        tg!("send_message", bot.send_message(chat_id, "Usage:\n/allowed +toolname — Add a tool\n/allowed -toolname — Remove a tool\n/allowed +tool1 -tool2 — Multiple at once\n/allowedtools — Show current list")
+            .await)?;
         return Ok(());
     }
 
@@ -1112,25 +1480,28 @@ async fn handle_allowed_command(
         return handle_allowedtools_command(bot, chat_id, state).await;
     }
 
-    let (op, raw_name) = if let Some(name) = arg.strip_prefix('+') {
-        ('+', name.trim())
-    } else if let Some(name) = arg.strip_prefix('-') {
-        ('-', name.trim())
-    } else {
-        shared_rate_limit_wait(state, chat_id).await;
-        bot.send_message(chat_id, "Use +toolname to add or -toolname to remove.\nExample: /allowed +Bash")
-            .await?;
-        return Ok(());
-    };
-
-    if raw_name.is_empty() {
-        shared_rate_limit_wait(state, chat_id).await;
-        bot.send_message(chat_id, "Tool name cannot be empty.")
-            .await?;
-        return Ok(());
+    // Parse multiple +name / -name tokens
+    let mut operations: Vec<(char, String)> = Vec::new();
+    for token_str in arg.split_whitespace() {
+        if let Some(name) = token_str.strip_prefix('+') {
+            let name = name.trim();
+            if !name.is_empty() {
+                operations.push(('+', normalize_tool_name(name)));
+            }
+        } else if let Some(name) = token_str.strip_prefix('-') {
+            let name = name.trim();
+            if !name.is_empty() {
+                operations.push(('-', normalize_tool_name(name)));
+            }
+        }
     }
 
-    let tool_name = normalize_tool_name(raw_name);
+    if operations.is_empty() {
+        shared_rate_limit_wait(state, chat_id).await;
+        tg!("send_message", bot.send_message(chat_id, "Use +toolname to add or -toolname to remove.\nExample: /allowed +Bash -Edit")
+            .await)?;
+        return Ok(());
+    }
 
     let response_msg = {
         let mut data = state.lock().await;
@@ -1141,34 +1512,42 @@ async fn handle_allowed_command(
             data.settings.allowed_tools.insert(chat_key.clone(), defaults);
         }
         let tools = data.settings.allowed_tools.get_mut(&chat_key).unwrap();
-        match op {
-            '+' => {
-                if tools.iter().any(|t| t == &tool_name) {
-                    format!("<code>{}</code> is already in the list.", html_escape(&tool_name))
-                } else {
-                    tools.push(tool_name.clone());
-                    save_bot_settings(token, &data.settings);
-                    format!("✅ Added <code>{}</code>", html_escape(&tool_name))
+        let mut results: Vec<String> = Vec::new();
+        let mut changed = false;
+        for (op, tool_name) in &operations {
+            match op {
+                '+' => {
+                    if tools.iter().any(|t| t == tool_name) {
+                        results.push(format!("<code>{}</code> already in list", html_escape(tool_name)));
+                    } else {
+                        tools.push(tool_name.clone());
+                        changed = true;
+                        results.push(format!("✅ <code>{}</code>", html_escape(tool_name)));
+                    }
                 }
-            }
-            '-' => {
-                let before_len = tools.len();
-                tools.retain(|t| t != &tool_name);
-                if tools.len() < before_len {
-                    save_bot_settings(token, &data.settings);
-                    format!("❌ Removed <code>{}</code>", html_escape(&tool_name))
-                } else {
-                    format!("<code>{}</code> is not in the list.", html_escape(&tool_name))
+                '-' => {
+                    let before_len = tools.len();
+                    tools.retain(|t| t != tool_name);
+                    if tools.len() < before_len {
+                        changed = true;
+                        results.push(format!("❌ <code>{}</code>", html_escape(tool_name)));
+                    } else {
+                        results.push(format!("<code>{}</code> not in list", html_escape(tool_name)));
+                    }
                 }
+                _ => unreachable!(),
             }
-            _ => unreachable!(),
         }
+        if changed {
+            save_bot_settings(token, &data.settings);
+        }
+        results.join("\n")
     };
 
     shared_rate_limit_wait(state, chat_id).await;
-    bot.send_message(chat_id, &response_msg)
+    tg!("send_message", bot.send_message(chat_id, &response_msg)
         .parse_mode(ParseMode::Html)
-        .await?;
+        .await)?;
 
     Ok(())
 }
@@ -1185,15 +1564,15 @@ async fn handle_public_command(
 ) -> ResponseResult<()> {
     if !is_group_chat {
         shared_rate_limit_wait(state, chat_id).await;
-        bot.send_message(chat_id, "This command is only available in group chats.")
-            .await?;
+        tg!("send_message", bot.send_message(chat_id, "This command is only available in group chats.")
+            .await)?;
         return Ok(());
     }
 
     if !is_owner {
         shared_rate_limit_wait(state, chat_id).await;
-        bot.send_message(chat_id, "Only the bot owner can change public access settings.")
-            .await?;
+        tg!("send_message", bot.send_message(chat_id, "Only the bot owner can change public access settings.")
+            .await)?;
         return Ok(());
     }
 
@@ -1230,9 +1609,9 @@ async fn handle_public_command(
     };
 
     shared_rate_limit_wait(state, chat_id).await;
-    bot.send_message(chat_id, &response_msg)
+    tg!("send_message", bot.send_message(chat_id, &response_msg)
         .parse_mode(ParseMode::Html)
-        .await?;
+        .await)?;
 
     Ok(())
 }
@@ -1267,8 +1646,8 @@ async fn handle_text_message(
         Some(info) => info,
         None => {
             shared_rate_limit_wait(state, chat_id).await;
-            bot.send_message(chat_id, "No active session. Use /start <path> first.")
-                .await?;
+            tg!("send_message", bot.send_message(chat_id, "No active session. Use /start <path> first.")
+                .await)?;
             return Ok(());
         }
     };
@@ -1279,7 +1658,7 @@ async fn handle_text_message(
 
     // Send placeholder message (update shared timestamp so spawned task knows)
     shared_rate_limit_wait(state, chat_id).await;
-    let placeholder = bot.send_message(chat_id, "...").await?;
+    let placeholder = tg!("send_message", bot.send_message(chat_id, "...").await)?;
     let placeholder_msg_id = placeholder.id;
 
     // Sanitize input
@@ -1356,7 +1735,7 @@ async fn handle_text_message(
         );
 
         if let Err(e) = result {
-            let _ = tx.send(StreamMessage::Error { message: e });
+            let _ = tx.send(StreamMessage::Error { message: e, stdout: String::new(), stderr: String::new(), exit_code: None });
         }
     });
 
@@ -1379,129 +1758,233 @@ async fn handle_text_message(
         let mut new_session_id: Option<String> = None;
         let mut spin_idx: usize = 0;
 
-        while !done {
+        let polling_time_ms = {
+            let data = state_owned.lock().await;
+            data.polling_time_ms
+        };
+        let mut queue_done = false;
+        let mut response_rendered = false;
+        while !done || !queue_done {
             // Check cancel token
             if cancel_token.cancelled.load(Ordering::Relaxed) {
-                cancelled = true;
+                if !done { cancelled = true; }
                 break;
             }
 
-            // Sleep 3s as polling interval (without reserving a rate limit slot)
-            tokio::time::sleep(tokio::time::Duration::from_millis(3000)).await;
+            // Sleep as polling interval (without reserving a rate limit slot)
+            tokio::time::sleep(tokio::time::Duration::from_millis(polling_time_ms)).await;
 
             // Check cancel token again after sleep
             if cancel_token.cancelled.load(Ordering::Relaxed) {
-                cancelled = true;
+                if !done { cancelled = true; }
                 break;
             }
 
-            // Drain all available messages
-            loop {
-                match rx.try_recv() {
-                    Ok(msg) => {
-                        match msg {
-                            StreamMessage::Init { session_id: sid } => {
-                                new_session_id = Some(sid);
-                            }
-                            StreamMessage::Text { content } => {
-                                full_response.push_str(&content);
-                            }
-                            StreamMessage::ToolUse { name, input } => {
-                                let summary = format_tool_input(&name, &input);
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}]   ⚙ {name}: {}", truncate_str(&summary, 80));
-                                full_response.push_str(&format!("\n\n⚙️ {}\n", summary));
-                            }
-                            StreamMessage::ToolResult { content, is_error } => {
-                                if is_error {
+            // === Phase 1: AI streaming (while !done) ===
+            if !done {
+                // Drain all available messages
+                loop {
+                    match rx.try_recv() {
+                        Ok(msg) => {
+                            match msg {
+                                StreamMessage::Init { session_id: sid } => {
+                                    new_session_id = Some(sid);
+                                }
+                                StreamMessage::Text { content } => {
+                                    full_response.push_str(&content);
+                                }
+                                StreamMessage::ToolUse { name, input } => {
+                                    let summary = format_tool_input(&name, &input);
                                     let ts = chrono::Local::now().format("%H:%M:%S");
-                                    println!("  [{ts}]   ✗ Error: {}", truncate_str(&content, 80));
-                                    let truncated = truncate_str(&content, 500);
-                                    if truncated.contains('\n') {
-                                        full_response.push_str(&format!("\n❌\n```\n{}\n```\n", truncated));
-                                    } else {
-                                        full_response.push_str(&format!("\n❌ `{}`\n\n", truncated));
+                                    println!("  [{ts}]   ⚙ {name}: {}", truncate_str(&summary, 80));
+                                    full_response.push_str(&format!("\n\n⚙️ {}\n", summary));
+                                }
+                                StreamMessage::ToolResult { content, is_error } => {
+                                    if is_error {
+                                        let ts = chrono::Local::now().format("%H:%M:%S");
+                                        println!("  [{ts}]   ✗ Error: {}", truncate_str(&content, 80));
+                                        let truncated = truncate_str(&content, 500);
+                                        if truncated.contains('\n') {
+                                            full_response.push_str(&format!("\n❌\n```\n{}\n```\n", truncated));
+                                        } else {
+                                            full_response.push_str(&format!("\n❌ `{}`\n\n", truncated));
+                                        }
+                                    } else if !content.is_empty() {
+                                        let truncated = truncate_str(&content, 300);
+                                        if truncated.contains('\n') {
+                                            full_response.push_str(&format!("\n```\n{}\n```\n", truncated));
+                                        } else {
+                                            full_response.push_str(&format!("\n✅ `{}`\n\n", truncated));
+                                        }
                                     }
-                                } else if !content.is_empty() {
-                                    let truncated = truncate_str(&content, 300);
-                                    if truncated.contains('\n') {
-                                        full_response.push_str(&format!("\n```\n{}\n```\n", truncated));
-                                    } else {
-                                        full_response.push_str(&format!("\n✅ `{}`\n\n", truncated));
+                                }
+                                StreamMessage::TaskNotification { summary, .. } => {
+                                    if !summary.is_empty() {
+                                        full_response.push_str(&format!("\n[Task: {}]\n", summary));
                                     }
                                 }
-                            }
-                            StreamMessage::TaskNotification { summary, .. } => {
-                                if !summary.is_empty() {
-                                    full_response.push_str(&format!("\n[Task: {}]\n", summary));
+                                StreamMessage::Done { result, session_id: sid } => {
+                                    if !result.is_empty() && full_response.is_empty() {
+                                        full_response = result;
+                                    }
+                                    if let Some(s) = sid {
+                                        new_session_id = Some(s);
+                                    }
+                                    done = true;
+                                }
+                                StreamMessage::Error { message, stdout, stderr, exit_code } => {
+                                    let stdout_display = if stdout.is_empty() { "(empty)".to_string() } else { stdout };
+                                    let stderr_display = if stderr.is_empty() { "(empty)".to_string() } else { stderr };
+                                    let code_display = match exit_code {
+                                        Some(c) => c.to_string(),
+                                        None => "(unknown)".to_string(),
+                                    };
+                                    full_response = format!(
+                                        "Error: {}\n```\nexit code: {}\n\n[stdout]\n{}\n\n[stderr]\n{}\n```",
+                                        message, code_display, stdout_display, stderr_display
+                                    );
+                                    done = true;
                                 }
                             }
-                            StreamMessage::Done { result, session_id: sid } => {
-                                if !result.is_empty() && full_response.is_empty() {
-                                    full_response = result;
+                        }
+                        Err(std::sync::mpsc::TryRecvError::Empty) => break,
+                        Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                            done = true;
+                            break;
+                        }
+                    }
+                }
+
+                // Build display text with spinning clock+text indicator appended
+                let indicator = SPINNER[spin_idx % SPINNER.len()];
+                spin_idx += 1;
+
+                let display_text = if full_response.is_empty() {
+                    indicator.to_string()
+                } else {
+                    let normalized = normalize_empty_lines(&full_response);
+                    let truncated = truncate_str(&normalized, TELEGRAM_MSG_LIMIT - 20);
+                    format!("{}\n\n{}", truncated, indicator)
+                };
+
+                if display_text != last_edit_text && !done {
+                    // Rate limit: reserve slot right before the actual API call
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let html_text = markdown_to_telegram_html(&display_text);
+                    if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_text)
+                        .parse_mode(ParseMode::Html)
+                        .await)
+                    {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        println!("  [{ts}]   ⚠ edit_message failed (streaming): {e}");
+                    }
+                    last_edit_text = display_text;
+                } else if !done {
+                    // No new content to display, send typing indicator
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let _ = tg!("send_chat_action", bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await);
+                }
+            }
+
+            // === Render final response once when AI completes ===
+            if done && !response_rendered {
+                response_rendered = true;
+
+                let stop_msg_id = {
+                    let data = state_owned.lock().await;
+                    data.stop_message_ids.get(&chat_id).cloned()
+                };
+
+                // Rate limit before final API call
+                shared_rate_limit_wait(&state_owned, chat_id).await;
+
+                // Final response
+                if full_response.is_empty() {
+                    full_response = "(No response)".to_string();
+                }
+
+                let final_response = normalize_empty_lines(&full_response);
+                let html_response = markdown_to_telegram_html(&final_response);
+
+                if html_response.len() <= TELEGRAM_MSG_LIMIT {
+                    if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_response)
+                        .parse_mode(ParseMode::Html)
+                        .await)
+                    {
+                        let ts = chrono::Local::now().format("%H:%M:%S");
+                        println!("  [{ts}]   ⚠ edit_message failed (HTML): {e}");
+                        shared_rate_limit_wait(&state_owned, chat_id).await;
+                        let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &final_response)
+                            .await);
+                    }
+                } else {
+                    let send_result = send_long_message(&bot_owned, chat_id, &html_response, Some(ParseMode::Html), &state_owned).await;
+                    match send_result {
+                        Ok(_) => {
+                            shared_rate_limit_wait(&state_owned, chat_id).await;
+                            let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
+                        }
+                        Err(e) => {
+                            let ts = chrono::Local::now().format("%H:%M:%S");
+                            println!("  [{ts}]   ⚠ send_long_message failed (HTML): {e}");
+                            let fallback_result = send_long_message(&bot_owned, chat_id, &final_response, None, &state_owned).await;
+                            match fallback_result {
+                                Ok(_) => {
+                                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                                    let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
                                 }
-                                if let Some(s) = sid {
-                                    new_session_id = Some(s);
+                                Err(e2) => {
+                                    println!("  [{ts}]   ⚠ send_long_message failed (plain): {e2}");
+                                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                                    let truncated = truncate_str(&final_response, TELEGRAM_MSG_LIMIT);
+                                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated)
+                                        .await);
                                 }
-                                done = true;
-                            }
-                            StreamMessage::Error { message } => {
-                                full_response = format!("Error: {}", message);
-                                done = true;
                             }
                         }
                     }
-                    Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
-                        done = true;
-                        break;
+                }
+
+                // Clean up leftover "Stopping..." message if /stop raced with normal completion
+                if let Some(msg_id) = stop_msg_id {
+                    shared_rate_limit_wait(&state_owned, chat_id).await;
+                    let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
+                }
+
+                // Update session state
+                {
+                    let mut data = state_owned.lock().await;
+                    if let Some(session) = data.sessions.get_mut(&chat_id) {
+                        if !session.cleared {
+                            if let Some(sid) = new_session_id.take() {
+                                session.session_id = Some(sid);
+                            }
+                            session.history.push(HistoryItem {
+                                item_type: HistoryType::User,
+                                content: user_text_owned.clone(),
+                            });
+                            session.history.push(HistoryItem {
+                                item_type: HistoryType::Assistant,
+                                content: final_response,
+                            });
+                            save_session_to_file(session, &current_path);
+                        }
                     }
                 }
+
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}] ▶ Response sent");
             }
 
-            // Build display text with spinning clock+text indicator appended
-            let indicator = SPINNER[spin_idx % SPINNER.len()];
-            spin_idx += 1;
-
-            let display_text = if full_response.is_empty() {
-                indicator.to_string()
-            } else {
-                let normalized = normalize_empty_lines(&full_response);
-                let truncated = truncate_str(&normalized, TELEGRAM_MSG_LIMIT - 20);
-                format!("{}\n\n{}", truncated, indicator)
-            };
-
-            if display_text != last_edit_text && !done {
-                // Rate limit: reserve slot right before the actual API call
-                shared_rate_limit_wait(&state_owned, chat_id).await;
-                let html_text = markdown_to_telegram_html(&display_text);
-                if let Err(e) = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_text)
-                    .parse_mode(ParseMode::Html)
-                    .await
-                {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}]   ⚠ edit_message failed (streaming): {e}");
-                }
-                last_edit_text = display_text;
-            } else if !done {
-                // No new content to display, send typing indicator
-                shared_rate_limit_wait(&state_owned, chat_id).await;
-                let _ = bot_owned.send_chat_action(chat_id, teloxide::types::ChatAction::Typing).await;
+            // === Queue processing (both during streaming and after done) ===
+            let queued = process_upload_queue(&bot_owned, chat_id, &state_owned).await;
+            if done {
+                queue_done = !queued;
             }
         }
 
-        // Remove cancel token and take stop message ID (processing is done)
-        let stop_msg_id = {
-            let mut data = state_owned.lock().await;
-            data.cancel_tokens.remove(&chat_id);
-            data.stop_message_ids.remove(&chat_id)
-        };
-
+        // === Post-loop: cancelled handling or lock release ===
         if cancelled {
-            // Ensure child process is killed.
-            // handle_stop_command may have missed the kill if the PID wasn't stored yet
-            // (race condition when /stop arrives before spawn_blocking runs).
-            // By now the blocking thread has most likely started and stored the PID.
             if let Ok(guard) = cancel_token.child_pid.lock() {
                 if let Some(pid) = *guard {
                     #[cfg(unix)]
@@ -1511,7 +1994,6 @@ async fn handle_text_message(
                 }
             }
 
-            // Build stopped response: show partial content + [Stopped] indicator
             let stopped_response = if full_response.trim().is_empty() {
                 "[Stopped]".to_string()
             } else {
@@ -1519,28 +2001,26 @@ async fn handle_text_message(
                 format!("{}\n\n[Stopped]", normalized)
             };
 
-            // Rate limit before final API call
             shared_rate_limit_wait(&state_owned, chat_id).await;
 
-            // Update placeholder message with partial response instead of deleting
             let html_stopped = markdown_to_telegram_html(&stopped_response);
             if html_stopped.len() <= TELEGRAM_MSG_LIMIT {
-                if let Err(e) = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
+                if let Err(e) = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_stopped)
                     .parse_mode(ParseMode::Html)
-                    .await
+                    .await)
                 {
                     let ts_err = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts_err}]   ⚠ edit_message failed (stopped/HTML): {e}");
                     shared_rate_limit_wait(&state_owned, chat_id).await;
-                    let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &stopped_response)
-                        .await;
+                    let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &stopped_response)
+                        .await);
                 }
             } else {
                 let send_result = send_long_message(&bot_owned, chat_id, &html_stopped, Some(ParseMode::Html), &state_owned).await;
                 match send_result {
                     Ok(_) => {
                         shared_rate_limit_wait(&state_owned, chat_id).await;
-                        let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
+                        let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
                     }
                     Err(e) => {
                         let ts_err = chrono::Local::now().format("%H:%M:%S");
@@ -1549,36 +2029,34 @@ async fn handle_text_message(
                         match fallback {
                             Ok(_) => {
                                 shared_rate_limit_wait(&state_owned, chat_id).await;
-                                let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
+                                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, placeholder_msg_id).await);
                             }
                             Err(_) => {
                                 shared_rate_limit_wait(&state_owned, chat_id).await;
                                 let truncated = truncate_str(&stopped_response, TELEGRAM_MSG_LIMIT);
-                                let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated)
-                                    .await;
+                                let _ = tg!("edit_message", bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated)
+                                    .await);
                             }
                         }
                     }
                 }
             }
 
-            // Delete the "Stopping..." message (no longer needed)
+            let stop_msg_id = {
+                let data = state_owned.lock().await;
+                data.stop_message_ids.get(&chat_id).cloned()
+            };
             if let Some(msg_id) = stop_msg_id {
                 shared_rate_limit_wait(&state_owned, chat_id).await;
-                let _ = bot_owned.delete_message(chat_id, msg_id).await;
+                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
             }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ■ Stopped");
 
-            // Record user message + stopped response in history
-            // (Claude's session context already has this interaction)
-            // Skip if session was cleared while we were running (race with /clear)
             let mut data = state_owned.lock().await;
             if let Some(session) = data.sessions.get_mut(&chat_id) {
-                if session.cleared {
-                    // Session was cleared by /clear; do not re-populate
-                } else {
+                if !session.cleared {
                     if let Some(sid) = new_session_id {
                         session.session_id = Some(sid);
                     }
@@ -1590,105 +2068,29 @@ async fn handle_text_message(
                         item_type: HistoryType::Assistant,
                         content: stopped_response,
                     });
-
                     save_session_to_file(session, &current_path);
                 }
             }
-
+            data.cancel_tokens.remove(&chat_id);
+            data.stop_message_ids.remove(&chat_id);
             return;
         }
 
-        // Rate limit before final API call
-        shared_rate_limit_wait(&state_owned, chat_id).await;
-
-        // Final response
-        if full_response.is_empty() {
-            full_response = "(No response)".to_string();
-        }
-
-        let full_response = normalize_empty_lines(&full_response);
-        let html_response = markdown_to_telegram_html(&full_response);
-
-        if html_response.len() <= TELEGRAM_MSG_LIMIT {
-            // Try HTML first, fall back to plain text if it fails (e.g. parse error, rate limit)
-            if let Err(e) = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &html_response)
-                .parse_mode(ParseMode::Html)
-                .await
-            {
-                let ts = chrono::Local::now().format("%H:%M:%S");
-                println!("  [{ts}]   ⚠ edit_message failed (HTML): {e}");
-                // Fallback: try plain text without HTML parse mode
-                shared_rate_limit_wait(&state_owned, chat_id).await;
-                let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &full_response)
-                    .await;
-            }
-        } else {
-            // For long responses: send new messages FIRST, then delete placeholder.
-            // This prevents the scenario where placeholder is deleted but send fails,
-            // leaving the user with no response at all.
-            let send_result = send_long_message(&bot_owned, chat_id, &html_response, Some(ParseMode::Html), &state_owned).await;
-            match send_result {
-                Ok(_) => {
-                    // New messages sent successfully, now safe to delete placeholder
-                    shared_rate_limit_wait(&state_owned, chat_id).await;
-                    let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
-                }
-                Err(e) => {
-                    let ts = chrono::Local::now().format("%H:%M:%S");
-                    println!("  [{ts}]   ⚠ send_long_message failed (HTML): {e}");
-                    // Fallback: try plain text
-                    let fallback_result = send_long_message(&bot_owned, chat_id, &full_response, None, &state_owned).await;
-                    match fallback_result {
-                        Ok(_) => {
-                            shared_rate_limit_wait(&state_owned, chat_id).await;
-                            let _ = bot_owned.delete_message(chat_id, placeholder_msg_id).await;
-                        }
-                        Err(e2) => {
-                            println!("  [{ts}]   ⚠ send_long_message failed (plain): {e2}");
-                            // Last resort: edit placeholder with truncated plain text
-                            shared_rate_limit_wait(&state_owned, chat_id).await;
-                            let truncated = truncate_str(&full_response, TELEGRAM_MSG_LIMIT);
-                            let _ = bot_owned.edit_message_text(chat_id, placeholder_msg_id, &truncated)
-                                .await;
-                        }
-                    }
-                }
-            }
-        }
-
-        // Clean up leftover "Stopping..." message if /stop raced with normal completion
-        if let Some(msg_id) = stop_msg_id {
-            shared_rate_limit_wait(&state_owned, chat_id).await;
-            let _ = bot_owned.delete_message(chat_id, msg_id).await;
-        }
-
-        // Update session state: push user message + assistant response together
-        // Skip if session was cleared while we were running (race with /clear)
+        // Clean up "Stopping..." message if /stop was sent during queue drain
         {
             let mut data = state_owned.lock().await;
-            if let Some(session) = data.sessions.get_mut(&chat_id) {
-                if session.cleared {
-                    // Session was cleared by /clear; do not re-populate
-                } else {
-                    if let Some(sid) = new_session_id {
-                        session.session_id = Some(sid);
-                    }
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::User,
-                        content: user_text_owned,
-                    });
-                    session.history.push(HistoryItem {
-                        item_type: HistoryType::Assistant,
-                        content: full_response,
-                    });
-
-                    save_session_to_file(session, &current_path);
-                }
+            if let Some(msg_id) = data.stop_message_ids.remove(&chat_id) {
+                drop(data);
+                shared_rate_limit_wait(&state_owned, chat_id).await;
+                let _ = tg!("delete_message", bot_owned.delete_message(chat_id, msg_id).await);
             }
         }
 
-        let ts = chrono::Local::now().format("%H:%M:%S");
-        println!("  [{ts}] ▶ Response sent");
+        // Release lock: allow new messages for this chat
+        {
+            let mut data = state_owned.lock().await;
+            data.cancel_tokens.remove(&chat_id);
+        }
     });
 
     Ok(())
@@ -1797,14 +2199,89 @@ fn floor_char_boundary(s: &str, index: usize) -> usize {
     }
 }
 
-/// Shared per-chat rate limiter using reservation pattern.
+/// Process one pending upload queue file for the given chat.
+/// Scans ~/.cokacdir/upload_queue/ for .queue files matching the current bot and chat_id,
+/// sends the oldest one, and deletes the queue file on success.
+/// Returns true if a file was processed (rate limit slot consumed).
+async fn process_upload_queue(bot: &Bot, chat_id: ChatId, state: &SharedState) -> bool {
+    let queue_dir = match dirs::home_dir() {
+        Some(h) => h.join(".cokacdir").join("upload_queue"),
+        None => return false,
+    };
+    if !queue_dir.is_dir() {
+        return false;
+    }
+
+    let current_key = token_hash(bot.token());
+
+    // Collect and sort queue files by name (timestamp-based, so alphabetical = chronological)
+    let mut entries: Vec<std::path::PathBuf> = match fs::read_dir(&queue_dir) {
+        Ok(rd) => rd
+            .filter_map(|e| e.ok())
+            .map(|e| e.path())
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("queue"))
+            .collect(),
+        Err(_) => return false,
+    };
+    entries.sort();
+
+    // Find the first entry matching this bot and chat_id
+    for entry_path in entries {
+        let content = match fs::read_to_string(&entry_path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+        let json: serde_json::Value = match serde_json::from_str(&content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+
+        let file_chat_id = json.get("chat_id").and_then(|v| v.as_i64()).unwrap_or(0);
+        let file_key = json.get("key").and_then(|v| v.as_str()).unwrap_or("");
+        let file_path = json.get("path").and_then(|v| v.as_str()).unwrap_or("");
+
+        if file_chat_id != chat_id.0 || file_key != current_key || file_path.is_empty() {
+            continue;
+        }
+
+        let path = std::path::PathBuf::from(file_path);
+        if !path.exists() {
+            // File no longer exists, remove queue entry
+            let _ = fs::remove_file(&entry_path);
+            return false;
+        }
+
+        // Remove queue file before sending (regardless of send result)
+        let _ = fs::remove_file(&entry_path);
+
+        // Rate limit and send
+        shared_rate_limit_wait(state, chat_id).await;
+        match tg!("send_document", bot.send_document(
+            chat_id,
+            teloxide::types::InputFile::file(&path),
+        ).await) {
+            Ok(_) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}]   📤 Upload sent: {}", file_path);
+            }
+            Err(e) => {
+                let ts = chrono::Local::now().format("%H:%M:%S");
+                println!("  [{ts}]   ⚠ Upload failed: {e}");
+            }
+        }
+        return true;
+    }
+
+    false
+}
+
 /// Acquires the lock briefly to calculate and reserve the next API call slot,
 /// then releases the lock and sleeps until the reserved time.
 /// This ensures that even concurrent tasks for the same chat maintain 3s gaps.
 async fn shared_rate_limit_wait(state: &SharedState, chat_id: ChatId) {
-    let min_gap = tokio::time::Duration::from_millis(3000);
     let sleep_until = {
         let mut data = state.lock().await;
+        let min_gap = tokio::time::Duration::from_millis(data.polling_time_ms);
         let last = data.api_timestamps.entry(chat_id).or_insert_with(||
             tokio::time::Instant::now() - tokio::time::Duration::from_secs(10)
         );
@@ -1833,7 +2310,7 @@ async fn send_long_message(
         if let Some(mode) = parse_mode {
             req = req.parse_mode(mode);
         }
-        req.await?;
+        tg!("send_message", req.await)?;
         return Ok(());
     }
 
@@ -1858,7 +2335,7 @@ async fn send_long_message(
             if let Some(mode) = parse_mode {
                 req = req.parse_mode(mode);
             }
-            req.await?;
+            tg!("send_message", req.await)?;
             break;
         }
 
@@ -1896,7 +2373,7 @@ async fn send_long_message(
         if let Some(mode) = parse_mode {
             req = req.parse_mode(mode);
         }
-        req.await?;
+        tg!("send_message", req.await)?;
 
         // Skip the newline character at the split point
         remaining = rest.strip_prefix('\n').unwrap_or(rest);

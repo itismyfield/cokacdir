@@ -91,7 +91,7 @@ pub enum StreamMessage {
     /// Completion
     Done { result: String, session_id: Option<String> },
     /// Error
-    Error { message: String },
+    Error { message: String, stdout: String, stderr: String, exit_code: Option<i32> },
 }
 
 /// Token for cooperative cancellation of streaming requests.
@@ -142,7 +142,8 @@ pub fn execute_command(
     };
     let mut args = vec![
         "-p".to_string(),
-        "--allowedTools".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+        "--tools".to_string(),
         tools_str,
         "--output-format".to_string(),
         "json".to_string(),
@@ -372,7 +373,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
     };
     let mut args = vec![
         "-p".to_string(),
-        "--allowedTools".to_string(),
+        "--dangerously-skip-permissions".to_string(),
+        "--tools".to_string(),
         tools_str,
         "--verbose".to_string(),
         "--output-format".to_string(),
@@ -467,6 +469,7 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     let mut last_session_id: Option<String> = None;
     let mut final_result: Option<String> = None;
+    let mut stdout_error: Option<(String, String)> = None; // (message, raw_line)
     let mut line_count = 0;
 
     debug_log("Entering lines loop - will block until first line arrives...");
@@ -490,7 +493,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
             Err(e) => {
                 debug_log(&format!("ERROR: Failed to read line: {}", e));
                 let _ = sender.send(StreamMessage::Error {
-                    message: format!("Failed to read output: {}", e)
+                    message: format!("Failed to read output: {}", e),
+                    stdout: String::new(), stderr: String::new(), exit_code: None,
                 });
                 break;
             }
@@ -551,8 +555,10 @@ IMPORTANT: Format your responses using Markdown for better readability:
                             last_session_id = session_id.clone();
                         }
                     }
-                    StreamMessage::Error { message } => {
+                    StreamMessage::Error { ref message, .. } => {
                         debug_log(&format!("  >>> Error: {}", message));
+                        stdout_error = Some((message.clone(), line.clone()));
+                        continue; // don't send yet; will combine with stderr after process exits
                     }
                     StreamMessage::TaskNotification { task_id, status, summary } => {
                         debug_log(&format!("  >>> TaskNotification: task_id={}, status={}, summary={}", task_id, status, summary));
@@ -601,6 +607,28 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log(&format!("Process finished in {:?}, status: {:?}, exit_code: {:?}",
         wait_start.elapsed(), status, status.code()));
 
+    // Handle stdout error or non-zero exit code
+    if stdout_error.is_some() || !status.success() {
+        let stderr_msg = child.stderr.take()
+            .and_then(|s| std::io::read_to_string(s).ok())
+            .unwrap_or_default();
+
+        let (message, stdout_raw) = if let Some((msg, raw)) = stdout_error {
+            (msg, raw)
+        } else {
+            (format!("Process exited with code {:?}", status.code()), String::new())
+        };
+
+        debug_log(&format!("Sending error: message={}, exit_code={:?}", message, status.code()));
+        let _ = sender.send(StreamMessage::Error {
+            message,
+            stdout: stdout_raw,
+            stderr: stderr_msg,
+            exit_code: status.code(),
+        });
+        return Ok(());
+    }
+
     // If we didn't get a proper Done message, send one now
     if final_result.is_none() {
         debug_log("No Done message received, sending synthetic Done message...");
@@ -611,11 +639,6 @@ IMPORTANT: Format your responses using Markdown for better readability:
         debug_log(&format!("Synthetic Done message sent, result={:?}", send_result.is_ok()));
     } else {
         debug_log("Done message was already received, not sending synthetic one");
-    }
-
-    if !status.success() {
-        debug_log(&format!("ERROR: Process failed with exit code {:?}", status.code()));
-        return Err(format!("Process exited with code {:?}", status.code()));
     }
 
     debug_log("========================================");
@@ -708,7 +731,27 @@ fn parse_stream_message(json: &Value) -> Option<StreamMessage> {
             None
         }
         "result" => {
+            // {"type":"result","subtype":"error_during_execution","is_error":true,"errors":["..."]}
             // {"type":"result","subtype":"success","result":"...","session_id":"..."}
+            let is_error = json.get("is_error")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if is_error {
+                let errors_raw = json.get("errors");
+                let result_raw = json.get("result").and_then(|v| v.as_str());
+                // Try "errors" array first, then fall back to "result" field
+                let error_msg = errors_raw
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .filter_map(|v| v.as_str())
+                            .collect::<Vec<_>>()
+                            .join("; ")
+                    })
+                    .or_else(|| result_raw.map(|s| s.to_string()))
+                    .unwrap_or_else(|| "Unknown error".to_string());
+                return Some(StreamMessage::Error { message: error_msg, stdout: String::new(), stderr: String::new(), exit_code: None });
+            }
             let result = json.get("result")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")

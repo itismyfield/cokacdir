@@ -34,6 +34,10 @@ fn default_encrypt_split_size() -> u64 {
     1800
 }
 
+fn default_telegram_polling_time() -> u64 {
+    3000
+}
+
 impl Default for PanelSettings {
     fn default() -> Self {
         Self {
@@ -97,6 +101,9 @@ pub struct Settings {
     /// Encryption split size in MB (0 = no split)
     #[serde(default = "default_encrypt_split_size")]
     pub encrypt_split_size: u64,
+    /// Telegram API polling interval in milliseconds (minimum 2500, default 3000)
+    #[serde(default = "default_telegram_polling_time")]
+    pub telegram_polling_time: u64,
 }
 
 impl Default for Settings {
@@ -138,6 +145,7 @@ impl Default for Settings {
             remote_profiles: Vec::new(),
             keybindings: KeybindingsConfig::default(),
             encrypt_split_size: default_encrypt_split_size(),
+            telegram_polling_time: default_telegram_polling_time(),
         }
     }
 }
