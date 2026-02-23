@@ -66,34 +66,56 @@ fn handle_base64(encoded: &str) {
 }
 
 fn handle_sendfile(path: &str, chat_id: i64, hash_key: &str) {
-    use teloxide::prelude::*;
-    use crate::services::telegram::resolve_token_by_hash;
-    let token = match resolve_token_by_hash(hash_key) {
-        Some(t) => t,
-        None => {
-            eprintln!("Error: no bot token found for hash key: {}", hash_key);
+    use md5::{Md5, Digest};
+
+    let file_path = std::path::Path::new(path);
+    if !file_path.exists() {
+        eprintln!("Error: file not found: {}", path);
+        std::process::exit(1);
+    }
+
+    let abs_path = match file_path.canonicalize() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(e) => {
+            eprintln!("Error: failed to resolve path: {}", e);
             std::process::exit(1);
         }
     };
-    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
-    rt.block_on(async {
-        let bot = Bot::new(&token);
-        let file_path = std::path::Path::new(path);
-        if !file_path.exists() {
-            eprintln!("Error: file not found: {}", path);
+
+    // Create upload queue directory
+    let queue_dir = match dirs::home_dir() {
+        Some(h) => h.join(".cokacdir").join("upload_queue"),
+        None => {
+            eprintln!("Error: cannot determine home directory");
             std::process::exit(1);
         }
-        match bot.send_document(
-            ChatId(chat_id),
-            teloxide::types::InputFile::file(file_path),
-        ).await {
-            Ok(_) => println!("File sent: {}", path),
-            Err(e) => {
-                eprintln!("Failed to send file: {}", e);
-                std::process::exit(1);
-            }
-        }
+    };
+    if let Err(e) = std::fs::create_dir_all(&queue_dir) {
+        eprintln!("Error: failed to create queue directory: {}", e);
+        std::process::exit(1);
+    }
+
+    // Generate queue filename: YYYY-MM-DD-hh-mm-ii-ss-mmm.{MD5}.queue
+    let now = chrono::Local::now();
+    let timestamp = now.format("%Y-%m-%d-%H-%M-%S").to_string();
+    let millis = now.format("%3f").to_string();
+    let md5_hash = format!("{:x}", Md5::digest(abs_path.as_bytes()));
+    let filename = format!("{}-{}.{}.queue", timestamp, millis, md5_hash);
+
+    // Write queue file
+    let queue_content = serde_json::json!({
+        "path": abs_path,
+        "chat_id": chat_id,
+        "key": hash_key,
     });
+    let queue_path = queue_dir.join(&filename);
+    match std::fs::write(&queue_path, queue_content.to_string()) {
+        Ok(_) => println!("Queued for upload: {}", abs_path),
+        Err(e) => {
+            eprintln!("Error: failed to write queue file: {}", e);
+            std::process::exit(1);
+        }
+    }
 }
 
 fn handle_ismcptool(tool_names: &[String]) {
