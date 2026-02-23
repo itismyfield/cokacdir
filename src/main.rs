@@ -43,7 +43,8 @@ fn print_help() {
     println!("    --ccserver <TOKEN>...   Start Telegram bot server(s)");
     println!("    --sendfile <PATH> --chat <ID> --key <HASH>");
     println!("                            Send file via Telegram bot (internal use, HASH = token hash)");
-    println!("    --dcserver <TOKEN>      Start Discord bot server");
+    println!("    --dcserver <TOKEN> [--webui PORT]");
+    println!("                            Start Discord bot server (optionally with web UI)");
     println!("    --discord-sendfile <PATH> --channel <ID> --key <HASH>");
     println!("                            Send file via Discord bot (internal use, HASH = token hash)");
     println!("    --webui [PORT]          Start web UI server (default port: 3333)");
@@ -115,7 +116,7 @@ fn handle_webui(port: u16) {
     rt.block_on(services::webui::run_webui(port));
 }
 
-fn handle_dcserver(token: String) {
+fn handle_dcserver(token: String, webui_port: Option<u16>) {
     let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
 
     let title = format!("  cokacdir v{}  |  Discord Bot Server  ", VERSION);
@@ -126,8 +127,15 @@ fn handle_dcserver(token: String) {
     println!("  └{}┘", "─".repeat(width));
     println!();
     println!("  ▸ Status : Connecting...");
-    println!();
-    rt.block_on(services::discord::run_bot(&token));
+
+    rt.block_on(async {
+        // Start web UI as background task if requested
+        if let Some(port) = webui_port {
+            tokio::spawn(services::webui::run_webui(port));
+        }
+        println!();
+        services::discord::run_bot(&token).await;
+    });
 }
 
 fn handle_discord_sendfile(path: &str, channel_id: u64, hash_key: &str) {
@@ -316,11 +324,19 @@ fn main() -> io::Result<()> {
             "--dcserver" => {
                 if i + 1 >= args.len() {
                     eprintln!("Error: --dcserver requires a token argument");
-                    eprintln!("Usage: cokacdir --dcserver <TOKEN>");
+                    eprintln!("Usage: cokacdir --dcserver <TOKEN> [--webui PORT]");
                     return Ok(());
                 }
                 let token = args[i + 1].clone();
-                handle_dcserver(token);
+                // Check for --webui flag after token
+                let webui_port = args.iter().position(|a| a == "--webui").and_then(|idx| {
+                    if idx + 1 < args.len() && !args[idx + 1].starts_with('-') {
+                        args[idx + 1].parse::<u16>().ok()
+                    } else {
+                        Some(3333)
+                    }
+                });
+                handle_dcserver(token, webui_port);
                 return Ok(());
             }
             "--discord-sendfile" => {
