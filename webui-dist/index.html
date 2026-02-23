@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>cokacdir - Session Monitor</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    background: #0a0a0f;
+    color: #e0e0e0;
+    min-height: 100vh;
+  }
+  .header {
+    padding: 20px 24px;
+    border-bottom: 1px solid #1a1a2e;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .header h1 { font-size: 18px; color: #7c6fef; }
+  .header .status {
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 10px;
+    background: #1a2a1a;
+    color: #4ade80;
+  }
+  .header .status.disconnected { background: #2a1a1a; color: #ef4444; }
+  .agents {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 16px;
+    padding: 24px;
+  }
+  .agent-card {
+    background: #12121a;
+    border: 1px solid #1a1a2e;
+    border-radius: 12px;
+    padding: 16px;
+    transition: border-color 0.3s;
+  }
+  .agent-card.active { border-color: #7c6fef; }
+  .agent-card .top { display: flex; justify-content: space-between; align-items: center; }
+  .agent-card .name { font-size: 14px; font-weight: 600; }
+  .agent-card .badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 8px;
+  }
+  .badge.active { background: #1a2a1a; color: #4ade80; }
+  .badge.waiting { background: #2a2a1a; color: #fbbf24; }
+  .agent-card .path {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #666;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .agent-card .tool {
+    margin-top: 8px;
+    font-size: 12px;
+    color: #7c6fef;
+  }
+  .empty {
+    text-align: center;
+    padding: 80px 24px;
+    color: #444;
+  }
+  .empty p { margin-top: 8px; font-size: 14px; }
+</style>
+</head>
+<body>
+  <div class="header">
+    <h1>cokacdir</h1>
+    <span id="ws-status" class="status disconnected">connecting...</span>
+  </div>
+  <div id="agents" class="agents"></div>
+  <div id="empty" class="empty" style="display:none">
+    <p>No active sessions</p>
+    <p style="font-size:12px;margin-top:4px">Start a session via Telegram or Discord bot</p>
+  </div>
+
+<script>
+const agentsEl = document.getElementById('agents');
+const emptyEl = document.getElementById('empty');
+const statusEl = document.getElementById('ws-status');
+
+let agents = [];
+
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  const ws = new WebSocket(`${proto}//${location.host}/ws`);
+
+  ws.onopen = () => {
+    statusEl.textContent = 'connected';
+    statusEl.className = 'status';
+  };
+
+  ws.onclose = () => {
+    statusEl.textContent = 'disconnected';
+    statusEl.className = 'status disconnected';
+    setTimeout(connect, 3000);
+  };
+
+  ws.onmessage = (e) => {
+    const msg = JSON.parse(e.data);
+    switch (msg.type) {
+      case 'existingAgents':
+        agents = msg.agents;
+        render();
+        break;
+      case 'agentCreated':
+        if (!agents.find(a => a.id === msg.id)) {
+          agents.push({ id: msg.id, status: 'active', session_id: '', current_path: '', last_tool: null });
+          render();
+        }
+        break;
+      case 'agentClosed':
+        agents = agents.filter(a => a.id !== msg.id);
+        render();
+        break;
+      case 'agentStatus':
+        { const a = agents.find(a => a.id === msg.id);
+          if (a) { a.status = msg.status; render(); } }
+        break;
+      case 'agentToolStart':
+        { const a = agents.find(a => a.id === msg.id);
+          if (a) { a.last_tool = msg.status; a.status = 'active'; render(); } }
+        break;
+      case 'agentToolDone':
+      case 'agentToolsClear':
+        { const a = agents.find(a => a.id === msg.id);
+          if (a) { a.last_tool = null; render(); } }
+        break;
+    }
+  };
+}
+
+function render() {
+  if (agents.length === 0) {
+    agentsEl.innerHTML = '';
+    emptyEl.style.display = 'block';
+    return;
+  }
+  emptyEl.style.display = 'none';
+  agentsEl.innerHTML = agents.map(a => `
+    <div class="agent-card ${a.status === 'active' ? 'active' : ''}">
+      <div class="top">
+        <span class="name">Session #${a.id}</span>
+        <span class="badge ${a.status}">${a.status}</span>
+      </div>
+      <div class="path">${a.current_path || 'unknown'}</div>
+      ${a.last_tool ? `<div class="tool">${a.last_tool}</div>` : ''}
+    </div>
+  `).join('');
+}
+
+connect();
+render();
+</script>
+</body>
+</html>

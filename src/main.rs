@@ -46,6 +46,7 @@ fn print_help() {
     println!("    --dcserver <TOKEN>      Start Discord bot server");
     println!("    --discord-sendfile <PATH> --channel <ID> --key <HASH>");
     println!("                            Send file via Discord bot (internal use, HASH = token hash)");
+    println!("    --webui [PORT]          Start web UI server (default port: 3333)");
     println!();
     println!("HOMEPAGE: https://cokacdir.cokac.com");
 }
@@ -99,6 +100,19 @@ fn handle_sendfile(path: &str, chat_id: i64, hash_key: &str) {
 
 fn print_version() {
     println!("cokacdir {}", VERSION);
+}
+
+fn handle_webui(port: u16) {
+    let rt = tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime");
+
+    let title = format!("  cokacdir v{}  |  Web UI Server  ", VERSION);
+    let width = title.chars().count();
+    println!();
+    println!("  ┌{}┐", "─".repeat(width));
+    println!("  │{}│", title);
+    println!("  └{}┘", "─".repeat(width));
+    println!();
+    rt.block_on(services::webui::run_webui(port));
 }
 
 fn handle_dcserver(token: String) {
@@ -288,6 +302,15 @@ fn main() -> io::Result<()> {
                     return Ok(());
                 }
                 handle_ccserver(tokens);
+                return Ok(());
+            }
+            "--webui" => {
+                let port = if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    args[i + 1].parse::<u16>().unwrap_or(3333)
+                } else {
+                    3333
+                };
+                handle_webui(port);
                 return Ok(());
             }
             "--dcserver" => {
