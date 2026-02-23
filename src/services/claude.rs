@@ -99,6 +99,8 @@ pub enum StreamMessage {
         total_cost_usd: Option<f64>,
         duration_ms: Option<u64>,
         num_turns: Option<u32>,
+        input_tokens: Option<u64>,
+        output_tokens: Option<u64>,
     },
 }
 
@@ -477,6 +479,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
 
     let mut last_session_id: Option<String> = None;
     let mut last_model: Option<String> = None;
+    let mut accum_input_tokens: u64 = 0;
+    let mut accum_output_tokens: u64 = 0;
     let mut final_result: Option<String> = None;
     let mut stdout_error: Option<(String, String)> = None; // (message, raw_line)
     let mut line_count = 0;
@@ -530,9 +534,19 @@ IMPORTANT: Format your responses using Markdown for better readability:
                 if let Some(content) = json.get("message").and_then(|m| m.get("content")) {
                     debug_log(&format!("  Assistant content array: {}", content));
                 }
-                // Extract model name from assistant messages
-                if let Some(model) = json.get("message").and_then(|m| m.get("model")).and_then(|v| v.as_str()) {
-                    last_model = Some(model.to_string());
+                // Extract model name and token usage from assistant messages
+                if let Some(msg_obj) = json.get("message") {
+                    if let Some(model) = msg_obj.get("model").and_then(|v| v.as_str()) {
+                        last_model = Some(model.to_string());
+                    }
+                    if let Some(usage) = msg_obj.get("usage") {
+                        if let Some(inp) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                            accum_input_tokens += inp;
+                        }
+                        if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                            accum_output_tokens += out;
+                        }
+                    }
                 }
             }
 
@@ -549,6 +563,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
                         total_cost_usd,
                         duration_ms,
                         num_turns,
+                        input_tokens: if accum_input_tokens > 0 { Some(accum_input_tokens) } else { None },
+                        output_tokens: if accum_output_tokens > 0 { Some(accum_output_tokens) } else { None },
                     });
                 }
             }

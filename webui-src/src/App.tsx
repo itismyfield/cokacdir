@@ -321,21 +321,22 @@ function App() {
         <div
           style={{
             position: 'absolute',
-            bottom: 40,
+            bottom: 44,
             left: '50%',
             transform: 'translateX(-50%)',
             zIndex: 50,
             display: 'flex',
-            gap: 16,
+            gap: 20,
             alignItems: 'center',
-            background: 'rgba(0, 0, 0, 0.75)',
-            color: '#ccc',
-            fontSize: '11px',
+            background: 'rgba(0, 0, 0, 0.85)',
+            color: '#ddd',
+            fontSize: '14px',
             fontFamily: 'monospace',
-            padding: '3px 12px',
-            borderRadius: 2,
+            padding: '6px 20px',
+            borderRadius: 4,
             whiteSpace: 'nowrap',
             pointerEvents: 'none',
+            border: '1px solid rgba(255,255,255,0.1)',
           }}
         >
           {(() => {
@@ -343,11 +344,17 @@ function App() {
             const model = entries.find((e) => e.model)?.model
             const totalCost = entries.reduce((sum, e) => sum + (e.totalCostUsd ?? 0), 0)
             const totalTurns = entries.reduce((sum, e) => sum + (e.numTurns ?? 0), 0)
+            const totalInput = entries.reduce((sum, e) => sum + (e.inputTokens ?? 0), 0)
+            const totalOutput = entries.reduce((sum, e) => sum + (e.outputTokens ?? 0), 0)
             const activeCount = Object.values(agentStatuses).filter((s) => s !== 'waiting').length
+            const fmtTokens = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`
             return (
               <>
                 {model && <span style={{ color: '#8be9fd' }}>{model}</span>}
                 {totalCost > 0 && <span style={{ color: '#50fa7b' }}>${totalCost.toFixed(4)}</span>}
+                {(totalInput > 0 || totalOutput > 0) && (
+                  <span style={{ color: '#bd93f9' }}>{fmtTokens(totalInput)} in / {fmtTokens(totalOutput)} out</span>
+                )}
                 {totalTurns > 0 && <span>{totalTurns} turns</span>}
                 <span>{agents.length} agent{agents.length !== 1 ? 's' : ''}{activeCount > 0 ? ` (${activeCount} active)` : ''}</span>
               </>

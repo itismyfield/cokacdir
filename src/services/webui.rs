@@ -51,6 +51,8 @@ pub fn push_statusline_by_session(
     total_cost_usd: Option<f64>,
     duration_ms: Option<u64>,
     num_turns: Option<u32>,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
 ) {
     let (Some(tx), Some(agents)) = (WEBUI_TX.get(), WEBUI_AGENTS.get()) else {
         return;
@@ -70,6 +72,8 @@ pub fn push_statusline_by_session(
         "totalCostUsd": total_cost_usd,
         "durationMs": duration_ms,
         "numTurns": num_turns,
+        "inputTokens": input_tokens,
+        "outputTokens": output_tokens,
     });
     if let Ok(json) = serde_json::to_string(&msg) {
         let _ = tx.send(json);

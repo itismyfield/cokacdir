@@ -44,6 +44,8 @@ export interface AgentStatusline {
   totalCostUsd?: number
   durationMs?: number
   numTurns?: number
+  inputTokens?: number
+  outputTokens?: number
 }
 
 export interface ExtensionMessageState {
@@ -431,6 +433,8 @@ export function useExtensionMessages(
             totalCostUsd: msg.totalCostUsd as number | undefined,
             durationMs: msg.durationMs as number | undefined,
             numTurns: msg.numTurns as number | undefined,
+            inputTokens: msg.inputTokens as number | undefined,
+            outputTokens: msg.outputTokens as number | undefined,
           },
         }))
       } else if (msg.type === 'furnitureAssetsLoaded') {
