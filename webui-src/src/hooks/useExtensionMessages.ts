@@ -48,6 +48,17 @@ export interface AgentStatusline {
   outputTokens?: number
 }
 
+export interface RateLimitWindow {
+  utilization: number // 0-100 percentage
+  resets_at: string   // ISO date string
+}
+
+export interface RateLimits {
+  fiveHour?: RateLimitWindow
+  sevenDay?: RateLimitWindow
+  sevenDaySonnet?: RateLimitWindow
+}
+
 export interface ExtensionMessageState {
   agents: number[]
   selectedAgent: number | null
@@ -55,6 +66,7 @@ export interface ExtensionMessageState {
   agentStatuses: Record<number, string>
   agentNames: Record<number, string>
   agentStatuslines: Record<number, AgentStatusline>
+  rateLimits: RateLimits | null
   subagentTools: Record<number, Record<string, ToolActivity[]>>
   subagentCharacters: SubagentCharacter[]
   layoutReady: boolean
@@ -84,6 +96,7 @@ export function useExtensionMessages(
   const [subagentCharacters, setSubagentCharacters] = useState<SubagentCharacter[]>([])
   const [layoutReady, setLayoutReady] = useState(false)
   const [agentStatuslines, setAgentStatuslines] = useState<Record<number, AgentStatusline>>({})
+  const [rateLimits, setRateLimits] = useState<RateLimits | null>(null)
   const [loadedAssets, setLoadedAssets] = useState<{ catalog: FurnitureAsset[]; sprites: Record<string, string[][]> } | undefined>()
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
@@ -437,6 +450,12 @@ export function useExtensionMessages(
             outputTokens: msg.outputTokens as number | undefined,
           },
         }))
+      } else if (msg.type === 'rateLimits') {
+        setRateLimits({
+          fiveHour: msg.fiveHour as RateLimitWindow | undefined,
+          sevenDay: msg.sevenDay as RateLimitWindow | undefined,
+          sevenDaySonnet: msg.sevenDaySonnet as RateLimitWindow | undefined,
+        })
       } else if (msg.type === 'furnitureAssetsLoaded') {
         try {
           const catalog = msg.catalog as FurnitureAsset[]
@@ -463,5 +482,5 @@ export function useExtensionMessages(
     return () => window.removeEventListener('message', handler)
   }, [getOfficeState])
 
-  return { agents, selectedAgent, agentTools, agentStatuses, agentNames, agentStatuslines, subagentTools, subagentCharacters, layoutReady, loadedAssets }
+  return { agents, selectedAgent, agentTools, agentStatuses, agentNames, agentStatuslines, rateLimits, subagentTools, subagentCharacters, layoutReady, loadedAssets }
 }

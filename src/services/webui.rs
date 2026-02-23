@@ -126,6 +126,45 @@ struct AppState {
     webui_dir: PathBuf,
 }
 
+// ─── Rate limit cache reader ─────────────────────────────────────────────────
+
+/// Read the claude-dashboard rate limit cache and broadcast to WebSocket clients.
+fn read_rate_limit_cache() -> Option<serde_json::Value> {
+    let cache_dir = dirs::home_dir()?.join(".cache").join("claude-dashboard");
+    if !cache_dir.exists() {
+        return None;
+    }
+    // Find the cache-*.json file (there's usually one, keyed by token hash)
+    let entries = fs::read_dir(&cache_dir).ok()?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        let name = path.file_name()?.to_str()?;
+        if name.starts_with("cache-") && name.ends_with(".json") {
+            let content = fs::read_to_string(&path).ok()?;
+            let val: serde_json::Value = serde_json::from_str(&content).ok()?;
+            return Some(val);
+        }
+    }
+    None
+}
+
+/// Broadcast rate limit data to all WebSocket clients.
+fn broadcast_rate_limits(tx: &broadcast::Sender<String>) {
+    if let Some(cache) = read_rate_limit_cache() {
+        if let Some(data) = cache.get("data") {
+            let msg = serde_json::json!({
+                "type": "rateLimits",
+                "fiveHour": data.get("five_hour"),
+                "sevenDay": data.get("seven_day"),
+                "sevenDaySonnet": data.get("seven_day_sonnet"),
+            });
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = tx.send(json);
+            }
+        }
+    }
+}
+
 // ─── Entry point ────────────────────────────────────────────────────────────
 
 /// Start the web UI server
@@ -168,6 +207,15 @@ pub async fn run_webui(port: u16) {
     let state_clone = state.clone();
     tokio::spawn(async move {
         watch_sessions(state_clone).await;
+    });
+
+    // Spawn rate limit cache watcher (reads ~/.cache/claude-dashboard/cache-*.json)
+    let tx_for_ratelimit = tx.clone();
+    tokio::spawn(async move {
+        loop {
+            broadcast_rate_limits(&tx_for_ratelimit);
+            tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+        }
     });
 
     let app = Router::new()
@@ -397,6 +445,21 @@ async fn handle_ws(mut socket: ws::WebSocket, state: Arc<AppState>) {
         if let Ok(layout) = serde_json::from_str::<serde_json::Value>(&content) {
             let msg = WsOutMessage::LayoutLoaded { layout };
             if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(ws::Message::Text(json.into())).await;
+            }
+        }
+    }
+
+    // Send initial rate limit data
+    if let Some(cache) = read_rate_limit_cache() {
+        if let Some(data) = cache.get("data") {
+            let rl_msg = serde_json::json!({
+                "type": "rateLimits",
+                "fiveHour": data.get("five_hour"),
+                "sevenDay": data.get("seven_day"),
+                "sevenDaySonnet": data.get("seven_day_sonnet"),
+            });
+            if let Ok(json) = serde_json::to_string(&rl_msg) {
                 let _ = socket.send(ws::Message::Text(json.into())).await;
             }
         }

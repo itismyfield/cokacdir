@@ -122,7 +122,7 @@ function App() {
 
   const isEditDirty = useCallback(() => editor.isEditMode && editor.isDirty, [editor.isEditMode, editor.isDirty])
 
-  const { agents, selectedAgent, agentTools, agentStatuses, agentNames, agentStatuslines, subagentTools, subagentCharacters, layoutReady, loadedAssets } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
+  const { agents, selectedAgent, agentTools, agentStatuses, agentNames, agentStatuslines, rateLimits, subagentTools, subagentCharacters, layoutReady, loadedAssets } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty)
 
   // Sync agent display names to the canvas renderer
   useEffect(() => {
@@ -317,7 +317,7 @@ function App() {
       )}
 
       {/* Statusline bar */}
-      {Object.keys(agentStatuslines).length > 0 && (
+      {(Object.keys(agentStatuslines).length > 0 || rateLimits) && (
         <div
           style={{
             position: 'absolute',
@@ -326,17 +326,18 @@ function App() {
             transform: 'translateX(-50%)',
             zIndex: 50,
             display: 'flex',
-            gap: 20,
+            gap: 16,
             alignItems: 'center',
-            background: 'rgba(0, 0, 0, 0.85)',
+            background: 'rgba(0, 0, 0, 0.88)',
             color: '#ddd',
             fontSize: '14px',
             fontFamily: 'monospace',
-            padding: '6px 20px',
-            borderRadius: 4,
+            padding: '8px 20px',
+            borderRadius: 6,
             whiteSpace: 'nowrap',
             pointerEvents: 'none',
-            border: '1px solid rgba(255,255,255,0.1)',
+            border: '1px solid rgba(255,255,255,0.12)',
+            backdropFilter: 'blur(8px)',
           }}
         >
           {(() => {
@@ -348,6 +349,25 @@ function App() {
             const totalOutput = entries.reduce((sum, e) => sum + (e.outputTokens ?? 0), 0)
             const activeCount = Object.values(agentStatuses).filter((s) => s !== 'waiting').length
             const fmtTokens = (n: number) => n >= 1_000_000 ? `${(n / 1_000_000).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : `${n}`
+
+            const barStyle: React.CSSProperties = {
+              width: 60,
+              height: 8,
+              background: 'rgba(255,255,255,0.1)',
+              borderRadius: 4,
+              overflow: 'hidden',
+              display: 'inline-block',
+              verticalAlign: 'middle',
+              position: 'relative',
+            }
+            const fillStyle = (pct: number, color: string): React.CSSProperties => ({
+              width: `${Math.min(pct, 100)}%`,
+              height: '100%',
+              background: pct >= 80 ? '#ff5555' : pct >= 50 ? '#ffb86c' : color,
+              borderRadius: 4,
+              transition: 'width 0.5s ease',
+            })
+
             return (
               <>
                 {model && <span style={{ color: '#8be9fd' }}>{model}</span>}
@@ -356,7 +376,42 @@ function App() {
                   <span style={{ color: '#bd93f9' }}>{fmtTokens(totalInput)} in / {fmtTokens(totalOutput)} out</span>
                 )}
                 {totalTurns > 0 && <span>{totalTurns} turns</span>}
-                <span>{agents.length} agent{agents.length !== 1 ? 's' : ''}{activeCount > 0 ? ` (${activeCount} active)` : ''}</span>
+                {agents.length > 0 && (
+                  <span>{agents.length} agent{agents.length !== 1 ? 's' : ''}{activeCount > 0 ? ` (${activeCount} active)` : ''}</span>
+                )}
+                {rateLimits?.fiveHour && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <span style={{ color: '#f1fa8c', fontSize: '12px' }}>5h</span>
+                    <span style={barStyle}>
+                      <span style={fillStyle(rateLimits.fiveHour.utilization, '#50fa7b')} />
+                    </span>
+                    <span style={{ color: rateLimits.fiveHour.utilization >= 80 ? '#ff5555' : rateLimits.fiveHour.utilization >= 50 ? '#ffb86c' : '#50fa7b', fontSize: '13px' }}>
+                      {rateLimits.fiveHour.utilization}%
+                    </span>
+                  </span>
+                )}
+                {rateLimits?.sevenDay && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <span style={{ color: '#f1fa8c', fontSize: '12px' }}>7d</span>
+                    <span style={barStyle}>
+                      <span style={fillStyle(rateLimits.sevenDay.utilization, '#8be9fd')} />
+                    </span>
+                    <span style={{ color: rateLimits.sevenDay.utilization >= 80 ? '#ff5555' : rateLimits.sevenDay.utilization >= 50 ? '#ffb86c' : '#8be9fd', fontSize: '13px' }}>
+                      {rateLimits.sevenDay.utilization}%
+                    </span>
+                  </span>
+                )}
+                {rateLimits?.sevenDaySonnet && (
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                    <span style={{ color: '#f1fa8c', fontSize: '12px' }}>7d-S</span>
+                    <span style={barStyle}>
+                      <span style={fillStyle(rateLimits.sevenDaySonnet.utilization, '#bd93f9')} />
+                    </span>
+                    <span style={{ color: rateLimits.sevenDaySonnet.utilization >= 80 ? '#ff5555' : rateLimits.sevenDaySonnet.utilization >= 50 ? '#ffb86c' : '#bd93f9', fontSize: '13px' }}>
+                      {rateLimits.sevenDaySonnet.utilization}%
+                    </span>
+                  </span>
+                )}
               </>
             )
           })()}

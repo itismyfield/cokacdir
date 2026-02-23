@@ -1,4 +1,4 @@
-import { TileType, FurnitureType, TILE_SIZE, Direction } from '../types.js'
+import { TileType, TILE_SIZE, Direction } from '../types.js'
 import { SKY_DESK, SKY_CHAIR, SKY_PLANT, SKY_BOOKSHELF, SKY_WHITEBOARD, SKY_VENDINGMACHINE } from './furnitureCatalog.js'
 import type { TileType as TileTypeVal, OfficeLayout, PlacedFurniture, Seat, FurnitureInstance, FloorColor } from '../types.js'
 import { getCatalogEntry } from './furnitureCatalog.js'
