@@ -6,9 +6,10 @@ use std::fs;
 use axum::{
     Router,
     extract::{State, WebSocketUpgrade, ws},
-    response::{Html, IntoResponse, Response},
+    response::{IntoResponse, Response},
     routing::get,
 };
+use tower_http::services::ServeDir;
 use tokio::sync::{Mutex, broadcast};
 
 use crate::ui::ai_screen;
@@ -44,12 +45,17 @@ enum WsOutMessage {
     AgentCreated { id: usize },
     #[serde(rename = "agentClosed")]
     AgentClosed { id: usize },
+    #[serde(rename = "layoutLoaded")]
+    LayoutLoaded { layout: serde_json::Value },
+    #[serde(rename = "settingsLoaded")]
+    SettingsLoaded { #[serde(rename = "soundEnabled")] sound_enabled: bool },
 }
 
 struct AppState {
     tx: broadcast::Sender<String>,
     agents: Mutex<HashMap<String, AgentSnapshot>>,
     sessions_dir: PathBuf,
+    webui_dir: PathBuf,
 }
 
 // ─── Entry point ────────────────────────────────────────────────────────────
@@ -64,12 +70,21 @@ pub async fn run_webui(port: u16) {
         }
     };
 
+    // Determine webui-dist path relative to the binary
+    let webui_dir = find_webui_dir();
+    if !webui_dir.join("index.html").exists() {
+        eprintln!("  ⚠ Web UI files not found at: {}", webui_dir.display());
+        eprintln!("  ⚠ Build webui-src first: cd webui-src && npm run build");
+        return;
+    }
+
     let (tx, _) = broadcast::channel::<String>(256);
 
     let state = Arc::new(AppState {
         tx: tx.clone(),
         agents: Mutex::new(HashMap::new()),
         sessions_dir: sessions_dir.clone(),
+        webui_dir: webui_dir.clone(),
     });
 
     // Initial session scan
@@ -82,17 +97,54 @@ pub async fn run_webui(port: u16) {
     });
 
     let app = Router::new()
-        .route("/", get(serve_index))
         .route("/ws", get(ws_handler))
+        .fallback_service(ServeDir::new(&webui_dir))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{port}");
     println!("  ▸ Web UI : http://localhost:{port}");
+    println!("  ▸ Assets : {}", webui_dir.display());
     println!();
 
     let listener = tokio::net::TcpListener::bind(&addr).await
         .expect("Failed to bind web UI address");
     axum::serve(listener, app).await.expect("Web UI server failed");
+}
+
+/// Find the webui-dist directory
+fn find_webui_dir() -> PathBuf {
+    // 1. Check next to the binary
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(parent) = exe.parent() {
+            let candidate = parent.join("webui-dist");
+            if candidate.exists() {
+                return candidate;
+            }
+            // Also check parent of parent (for development: target/release/../webui-dist)
+            if let Some(grandparent) = parent.parent() {
+                let candidate = grandparent.join("webui-dist");
+                if candidate.exists() {
+                    return candidate;
+                }
+                // target/release/../../webui-dist
+                if let Some(ggparent) = grandparent.parent() {
+                    let candidate = ggparent.join("webui-dist");
+                    if candidate.exists() {
+                        return candidate;
+                    }
+                }
+            }
+        }
+    }
+    // 2. Check ~/.cokacdir/webui-dist
+    if let Some(home) = dirs::home_dir() {
+        let candidate = home.join(".cokacdir").join("webui-dist");
+        if candidate.exists() {
+            return candidate;
+        }
+    }
+    // 3. Fallback: current dir
+    PathBuf::from("webui-dist")
 }
 
 // ─── Session scanning ───────────────────────────────────────────────────────
@@ -160,16 +212,13 @@ fn load_session_file(path: &Path, next_id: usize) -> Option<AgentSnapshot> {
 // ─── File watcher ───────────────────────────────────────────────────────────
 
 /// Watch the sessions directory for changes and broadcast updates.
-/// Uses polling fallback instead of native fs events to avoid Tokio runtime issues.
 async fn watch_sessions(state: Arc<AppState>) {
     let sessions_dir = state.sessions_dir.clone();
 
-    // Ensure directory exists
     if !sessions_dir.exists() {
         let _ = fs::create_dir_all(&sessions_dir);
     }
 
-    // Poll-based watcher: check for changes every 2 seconds
     loop {
         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
 
@@ -194,7 +243,6 @@ async fn watch_sessions(state: Arc<AppState>) {
             if !changed { continue; }
         }
 
-        // Detect changes and broadcast
         for (sid, agent) in new_agents.iter() {
             if !old_agents.contains_key(sid) {
                 broadcast_msg(&state.tx, &WsOutMessage::AgentCreated { id: agent.id });
@@ -218,7 +266,6 @@ async fn watch_sessions(state: Arc<AppState>) {
             }
         }
 
-        // Send full state update
         let snapshots: Vec<AgentSnapshot> = new_agents.values().cloned().collect();
         broadcast_msg(&state.tx, &WsOutMessage::ExistingAgents { agents: snapshots });
     }
@@ -232,11 +279,6 @@ fn broadcast_msg(tx: &broadcast::Sender<String>, msg: &WsOutMessage) {
 
 // ─── HTTP handlers ──────────────────────────────────────────────────────────
 
-/// Serve the embedded web UI index page
-async fn serve_index() -> Html<&'static str> {
-    Html(include_str!("../../webui-dist/index.html"))
-}
-
 /// WebSocket upgrade handler
 async fn ws_handler(
     ws: WebSocketUpgrade,
@@ -247,19 +289,52 @@ async fn ws_handler(
 
 /// Handle a WebSocket connection
 async fn handle_ws(mut socket: ws::WebSocket, state: Arc<AppState>) {
-    // Send current state
+    // Send default layout if available
+    let layout_path = state.webui_dir.join("assets").join("default-layout.json");
+    if let Ok(content) = fs::read_to_string(&layout_path) {
+        if let Ok(layout) = serde_json::from_str::<serde_json::Value>(&content) {
+            let msg = WsOutMessage::LayoutLoaded { layout };
+            if let Ok(json) = serde_json::to_string(&msg) {
+                let _ = socket.send(ws::Message::Text(json.into())).await;
+            }
+        }
+    }
+
+    // Send settings
+    let settings_msg = WsOutMessage::SettingsLoaded { sound_enabled: false };
+    if let Ok(json) = serde_json::to_string(&settings_msg) {
+        let _ = socket.send(ws::Message::Text(json.into())).await;
+    }
+
+    // Send current agents as existingAgents
     let agents: Vec<AgentSnapshot> = {
         state.agents.lock().await.values().cloned().collect()
     };
-    let init_msg = WsOutMessage::ExistingAgents { agents };
-    if let Ok(json) = serde_json::to_string(&init_msg) {
+    let agent_ids: Vec<usize> = agents.iter().map(|a| a.id).collect();
+
+    // pixel-agents expects: { type: "existingAgents", agents: number[] }
+    let init_json = serde_json::json!({
+        "type": "existingAgents",
+        "agents": agent_ids,
+    });
+    if let Ok(json) = serde_json::to_string(&init_json) {
         let _ = socket.send(ws::Message::Text(json.into())).await;
+    }
+
+    // Send initial status for each agent
+    for agent in &agents {
+        let status_msg = WsOutMessage::AgentStatus {
+            id: agent.id,
+            status: agent.status.clone(),
+        };
+        if let Ok(json) = serde_json::to_string(&status_msg) {
+            let _ = socket.send(ws::Message::Text(json.into())).await;
+        }
     }
 
     // Subscribe to broadcast
     let mut rx = state.tx.subscribe();
 
-    // Forward broadcast messages to this client
     loop {
         tokio::select! {
             msg = rx.recv() => {
@@ -273,11 +348,23 @@ async fn handle_ws(mut socket: ws::WebSocket, state: Arc<AppState>) {
                     Err(_) => break,
                 }
             }
-            // Handle incoming messages from client (e.g. focusAgent)
             msg = socket.recv() => {
                 match msg {
+                    Some(Ok(ws::Message::Text(text))) => {
+                        // Handle client messages
+                        if let Ok(val) = serde_json::from_str::<serde_json::Value>(&text) {
+                            if let Some(msg_type) = val.get("type").and_then(|v| v.as_str()) {
+                                match msg_type {
+                                    "webviewReady" => {
+                                        // Re-send agents (already sent above, but handle reconnect)
+                                    }
+                                    _ => {} // Ignore other client messages
+                                }
+                            }
+                        }
+                    }
                     Some(Ok(ws::Message::Close(_))) | None => break,
-                    _ => {} // Ignore other messages for now
+                    _ => {}
                 }
             }
         }

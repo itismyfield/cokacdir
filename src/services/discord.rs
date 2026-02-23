@@ -217,11 +217,100 @@ fn risk_badge(destructive: bool) -> &'static str {
     if destructive { "⚠️" } else { "" }
 }
 
+/// Claude Code built-in slash commands
+const BUILTIN_SKILLS: &[(&str, &str)] = &[
+    ("compact",     "Compact conversation to reduce context"),
+    ("cost",        "Show token usage and cost for this session"),
+    ("doctor",      "Check Claude Code health and configuration"),
+    ("init",        "Initialize project with CLAUDE.md guide"),
+    ("login",       "Switch Anthropic accounts"),
+    ("logout",      "Sign out from Anthropic account"),
+    ("memory",      "Edit CLAUDE.md memory files"),
+    ("model",       "Switch AI model"),
+    ("permissions", "View and manage tool permissions"),
+    ("pr-comments", "View PR comments for current branch"),
+    ("review",      "Code review for uncommitted changes"),
+    ("status",      "Show session status and git info"),
+    ("terminal-setup", "Install Shift+Enter key binding"),
+    ("vim",         "Toggle vim keybinding mode"),
+];
+
+/// Extract a description from a skill .md file.
+/// Priority: 1) frontmatter `description:` field  2) first meaningful text line
+fn extract_skill_description(content: &str) -> String {
+    let lines: Vec<&str> = content.lines().collect();
+
+    // Check for YAML frontmatter (starts with ---)
+    if lines.first().map(|l| l.trim()) == Some("---") {
+        // Find closing ---
+        for (i, line) in lines.iter().enumerate().skip(1) {
+            let trimmed = line.trim();
+            if trimmed == "---" {
+                // Look for description: inside frontmatter
+                for fm_line in &lines[1..i] {
+                    let fm_trimmed = fm_line.trim();
+                    if let Some(desc) = fm_trimmed.strip_prefix("description:") {
+                        let desc = desc.trim();
+                        if !desc.is_empty() {
+                            return desc.chars().take(80).collect();
+                        }
+                    }
+                }
+                // No description in frontmatter, use first line after frontmatter
+                for after_line in &lines[(i + 1)..] {
+                    let t = after_line.trim().trim_start_matches('#').trim();
+                    if !t.is_empty() {
+                        return t.chars().take(80).collect();
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    // No frontmatter: skip heading lines like "# 역할", use first non-heading meaningful line
+    let mut found_heading = false;
+    for line in &lines {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.starts_with('#') {
+            found_heading = true;
+            continue;
+        }
+        // Use this line as description
+        return trimmed.chars().take(80).collect();
+    }
+
+    // Fallback: if only heading exists, use heading text
+    if found_heading {
+        for line in &lines {
+            let trimmed = line.trim();
+            if trimmed.starts_with('#') {
+                let t = trimmed.trim_start_matches('#').trim();
+                if !t.is_empty() {
+                    return t.chars().take(80).collect();
+                }
+            }
+        }
+    }
+
+    "Custom skill".to_string()
+}
+
 /// Scan for available Claude Code skills (slash commands).
 /// Searches: ~/.claude/commands/ and <project>/.claude/commands/
+/// Also includes Claude Code built-in commands.
 fn scan_skills(project_path: Option<&str>) -> Vec<(String, String)> {
     let mut skills: Vec<(String, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
+
+    // Add built-in commands first
+    for (name, desc) in BUILTIN_SKILLS {
+        seen.insert(name.to_string());
+        skills.push((name.to_string(), desc.to_string()));
+    }
 
     let mut dirs_to_scan: Vec<std::path::PathBuf> = Vec::new();
 
@@ -246,21 +335,9 @@ fn scan_skills(project_path: Option<&str>) -> Vec<(String, String)> {
                 if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
                     let name = stem.to_string();
                     if seen.insert(name.clone()) {
-                        // Read first line as description
                         let desc = fs::read_to_string(&path)
                             .ok()
-                            .and_then(|content| {
-                                content.lines()
-                                    .find(|l| {
-                                        let t = l.trim().trim_start_matches('#').trim();
-                                        !t.is_empty()
-                                    })
-                                    .map(|l| {
-                                        let t = l.trim().trim_start_matches('#').trim();
-                                        let truncated: String = t.chars().take(80).collect();
-                                        truncated
-                                    })
-                            })
+                            .map(|content| extract_skill_description(&content))
                             .unwrap_or_else(|| format!("Skill: {}", name));
                         skills.push((name, desc));
                     }
@@ -602,8 +679,11 @@ async fn cmd_start(
         }
 
         // Persist channel → path mapping for auto-restore
-        data.settings.last_sessions.insert(channel_id.get().to_string(), canonical_path);
+        data.settings.last_sessions.insert(channel_id.get().to_string(), canonical_path.clone());
         save_bot_settings(&ctx.data().token, &data.settings);
+
+        // Rescan skills with project path to pick up project-level commands
+        data.skills_cache = scan_skills(Some(&canonical_path));
     }
 
     let response_text = response_lines.join("\n");
@@ -1793,6 +1873,8 @@ async fn auto_restore_session(
                 session.session_id = Some(session_data.session_id.clone());
                 session.history = session_data.history.clone();
             }
+            // Rescan skills with project path
+            data.skills_cache = scan_skills(Some(&last_path));
             let ts = chrono::Local::now().format("%H:%M:%S");
             println!("  [{ts}] ↻ Auto-restored session: {last_path}");
         }
