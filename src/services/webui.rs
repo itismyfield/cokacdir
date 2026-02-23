@@ -289,7 +289,28 @@ async fn ws_handler(
 
 /// Handle a WebSocket connection
 async fn handle_ws(mut socket: ws::WebSocket, state: Arc<AppState>) {
-    // Send default layout if available
+    // Send settings first
+    let settings_msg = WsOutMessage::SettingsLoaded { sound_enabled: false };
+    if let Ok(json) = serde_json::to_string(&settings_msg) {
+        let _ = socket.send(ws::Message::Text(json.into())).await;
+    }
+
+    // Send existingAgents BEFORE layoutLoaded — the frontend buffers agents
+    // in pendingAgents and only flushes them when layoutLoaded arrives.
+    let agents: Vec<AgentSnapshot> = {
+        state.agents.lock().await.values().cloned().collect()
+    };
+    let agent_ids: Vec<usize> = agents.iter().map(|a| a.id).collect();
+
+    let init_json = serde_json::json!({
+        "type": "existingAgents",
+        "agents": agent_ids,
+    });
+    if let Ok(json) = serde_json::to_string(&init_json) {
+        let _ = socket.send(ws::Message::Text(json.into())).await;
+    }
+
+    // Send layoutLoaded last — this triggers pending agent flush + layoutReady
     let layout_path = state.webui_dir.join("assets").join("default-layout.json");
     if let Ok(content) = fs::read_to_string(&layout_path) {
         if let Ok(layout) = serde_json::from_str::<serde_json::Value>(&content) {
@@ -298,27 +319,6 @@ async fn handle_ws(mut socket: ws::WebSocket, state: Arc<AppState>) {
                 let _ = socket.send(ws::Message::Text(json.into())).await;
             }
         }
-    }
-
-    // Send settings
-    let settings_msg = WsOutMessage::SettingsLoaded { sound_enabled: false };
-    if let Ok(json) = serde_json::to_string(&settings_msg) {
-        let _ = socket.send(ws::Message::Text(json.into())).await;
-    }
-
-    // Send current agents as existingAgents
-    let agents: Vec<AgentSnapshot> = {
-        state.agents.lock().await.values().cloned().collect()
-    };
-    let agent_ids: Vec<usize> = agents.iter().map(|a| a.id).collect();
-
-    // pixel-agents expects: { type: "existingAgents", agents: number[] }
-    let init_json = serde_json::json!({
-        "type": "existingAgents",
-        "agents": agent_ids,
-    });
-    if let Ok(json) = serde_json::to_string(&init_json) {
-        let _ = socket.send(ws::Message::Text(json.into())).await;
     }
 
     // Send initial status for each agent

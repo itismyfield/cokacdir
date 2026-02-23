@@ -3,35 +3,42 @@
 /// as native MessageEvents so the rest of the app works unchanged.
 
 let ws: WebSocket | null = null;
-let ready = false;
-const queue: unknown[] = [];
+let wsReady = false;
+const sendQueue: unknown[] = [];
+
+// Buffer incoming messages until the React listener is registered.
+// useExtensionMessages sends { type: 'webviewReady' } once its listener is up.
+let listenerReady = false;
+const incomingBuffer: unknown[] = [];
 
 function connect() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   ws = new WebSocket(`${proto}//${location.host}/ws`);
 
   ws.onopen = () => {
-    ready = true;
-    // Flush queued messages
-    for (const msg of queue) {
+    wsReady = true;
+    for (const msg of sendQueue) {
       ws!.send(JSON.stringify(msg));
     }
-    queue.length = 0;
+    sendQueue.length = 0;
   };
 
   ws.onmessage = (e) => {
     try {
       const data = JSON.parse(e.data);
-      // Dispatch as a MessageEvent so useExtensionMessages.ts picks it up
-      window.dispatchEvent(new MessageEvent('message', { data: { data } }));
+      if (listenerReady) {
+        window.dispatchEvent(new MessageEvent('message', { data }));
+      } else {
+        // Buffer until React event listener is registered
+        incomingBuffer.push(data);
+      }
     } catch {
       // ignore parse errors
     }
   };
 
   ws.onclose = () => {
-    ready = false;
-    // Auto-reconnect after 3 seconds
+    wsReady = false;
     setTimeout(connect, 3000);
   };
 }
@@ -40,10 +47,19 @@ connect();
 
 export const vscode = {
   postMessage(msg: unknown): void {
-    if (ready && ws && ws.readyState === WebSocket.OPEN) {
+    // When React sends 'webviewReady', flush buffered incoming messages
+    if (msg && typeof msg === 'object' && (msg as Record<string, unknown>).type === 'webviewReady') {
+      listenerReady = true;
+      for (const data of incomingBuffer) {
+        window.dispatchEvent(new MessageEvent('message', { data }));
+      }
+      incomingBuffer.length = 0;
+    }
+
+    if (wsReady && ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify(msg));
     } else {
-      queue.push(msg);
+      sendQueue.push(msg);
     }
   },
 };
