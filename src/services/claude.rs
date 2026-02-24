@@ -6,6 +6,8 @@ use std::fs::OpenOptions;
 use regex::Regex;
 use serde_json::Value;
 
+use crate::services::remote::RemoteProfile;
+
 /// Cached path to the claude binary.
 /// Once resolved, reused for all subsequent calls.
 static CLAUDE_PATH: OnceLock<Option<String>> = OnceLock::new();
@@ -109,6 +111,8 @@ pub enum StreamMessage {
 pub struct CancelToken {
     pub cancelled: std::sync::atomic::AtomicBool,
     pub child_pid: std::sync::Mutex<Option<u32>>,
+    /// SSH cancel flag — set to true to signal remote execution to close the channel
+    pub ssh_cancel: std::sync::Mutex<Option<std::sync::Arc<std::sync::atomic::AtomicBool>>>,
 }
 
 impl CancelToken {
@@ -116,6 +120,7 @@ impl CancelToken {
         Self {
             cancelled: std::sync::atomic::AtomicBool::new(false),
             child_pid: std::sync::Mutex::new(None),
+            ssh_cancel: std::sync::Mutex::new(None),
         }
     }
 }
@@ -338,6 +343,7 @@ pub fn execute_command_streaming(
     system_prompt: Option<&str>,
     allowed_tools: Option<&[String]>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
+    remote_profile: Option<&RemoteProfile>,
 ) -> Result<(), String> {
     debug_log("========================================");
     debug_log("=== execute_command_streaming START ===");
@@ -410,6 +416,19 @@ IMPORTANT: Format your responses using Markdown for better readability:
         }
         args.push("--resume".to_string());
         args.push(sid.to_string());
+    }
+
+    // Remote execution path: SSH to remote host
+    if let Some(profile) = remote_profile {
+        debug_log("Remote profile detected — delegating to execute_streaming_remote()");
+        return execute_streaming_remote(
+            profile,
+            &args,
+            prompt,
+            working_dir,
+            sender,
+            cancel_token,
+        );
     }
 
     let claude_bin = get_claude_path()
@@ -694,6 +713,336 @@ IMPORTANT: Format your responses using Markdown for better readability:
     debug_log("=== execute_command_streaming END (success) ===");
     debug_log("========================================");
     Ok(())
+}
+
+/// Shared state for processing stream-json lines from Claude.
+/// Used by both local and remote execution paths.
+struct StreamLineState {
+    last_session_id: Option<String>,
+    last_model: Option<String>,
+    accum_input_tokens: u64,
+    accum_output_tokens: u64,
+    final_result: Option<String>,
+    stdout_error: Option<(String, String)>,
+}
+
+impl StreamLineState {
+    fn new() -> Self {
+        Self {
+            last_session_id: None,
+            last_model: None,
+            accum_input_tokens: 0,
+            accum_output_tokens: 0,
+            final_result: None,
+            stdout_error: None,
+        }
+    }
+}
+
+/// Process a single stream-json line. Returns false if the sender channel is disconnected.
+/// Sets `stdout_error` in state for error messages (these are deferred until process exit).
+fn process_stream_line(
+    line: &str,
+    sender: &Sender<StreamMessage>,
+    state: &mut StreamLineState,
+) -> bool {
+    if line.trim().is_empty() {
+        return true;
+    }
+
+    let json = match serde_json::from_str::<Value>(line) {
+        Ok(j) => j,
+        Err(_) => return true,
+    };
+
+    let msg_type = json.get("type").and_then(|v| v.as_str()).unwrap_or("unknown");
+
+    // Extract model name and token usage from assistant messages
+    if msg_type == "assistant" {
+        if let Some(msg_obj) = json.get("message") {
+            if let Some(model) = msg_obj.get("model").and_then(|v| v.as_str()) {
+                state.last_model = Some(model.to_string());
+            }
+            if let Some(usage) = msg_obj.get("usage") {
+                if let Some(inp) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                    state.accum_input_tokens += inp;
+                }
+                if let Some(out) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                    state.accum_output_tokens += out;
+                }
+            }
+        }
+    }
+
+    // Extract statusline info from result events
+    if msg_type == "result" {
+        let cost_usd = json.get("cost_usd").and_then(|v| v.as_f64());
+        let total_cost_usd = json.get("total_cost_usd").and_then(|v| v.as_f64());
+        let duration_ms = json.get("duration_ms").and_then(|v| v.as_u64());
+        let num_turns = json.get("num_turns").and_then(|v| v.as_u64()).map(|v| v as u32);
+        if cost_usd.is_some() || total_cost_usd.is_some() || state.last_model.is_some() {
+            let _ = sender.send(StreamMessage::StatusUpdate {
+                model: state.last_model.clone(),
+                cost_usd,
+                total_cost_usd,
+                duration_ms,
+                num_turns,
+                input_tokens: if state.accum_input_tokens > 0 { Some(state.accum_input_tokens) } else { None },
+                output_tokens: if state.accum_output_tokens > 0 { Some(state.accum_output_tokens) } else { None },
+            });
+        }
+    }
+
+    if let Some(msg) = parse_stream_message(&json) {
+        // Track session_id and final result
+        match &msg {
+            StreamMessage::Init { session_id } => {
+                state.last_session_id = Some(session_id.clone());
+            }
+            StreamMessage::Done { result, session_id } => {
+                state.final_result = Some(result.clone());
+                if session_id.is_some() {
+                    state.last_session_id = session_id.clone();
+                }
+            }
+            StreamMessage::Error { ref message, .. } => {
+                state.stdout_error = Some((message.clone(), line.to_string()));
+                return true; // don't send yet; will combine with stderr after process exits
+            }
+            _ => {}
+        }
+
+        if sender.send(msg).is_err() {
+            return false; // channel disconnected
+        }
+    }
+
+    true
+}
+
+/// Shell-escape a string using single quotes (POSIX safe).
+/// Internal single quotes are replaced with `'\''`.
+fn shell_escape(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Execute claude command on a remote host via SSH, streaming stdout lines
+/// back through the sender channel.
+fn execute_streaming_remote(
+    profile: &RemoteProfile,
+    args: &[String],
+    prompt: &str,
+    working_dir: &str,
+    sender: Sender<StreamMessage>,
+    cancel_token: Option<std::sync::Arc<CancelToken>>,
+) -> Result<(), String> {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use crate::services::remote::{RemoteAuth, SshHandler};
+
+    debug_log("=== execute_streaming_remote START ===");
+    debug_log(&format!("Remote host: {}@{}:{}", profile.user, profile.host, profile.port));
+
+    let runtime = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("Failed to create tokio runtime: {}", e))?;
+
+    let profile = profile.clone();
+    let args = args.to_vec();
+    let prompt = prompt.to_string();
+    let working_dir = working_dir.to_string();
+
+    // Shared cancel flag for SSH
+    let ssh_cancel_flag = Arc::new(AtomicBool::new(false));
+    if let Some(ref token) = cancel_token {
+        *token.ssh_cancel.lock().unwrap() = Some(ssh_cancel_flag.clone());
+    }
+
+    let ssh_cancel = ssh_cancel_flag.clone();
+    let cancel_token_inner = cancel_token.clone();
+
+    runtime.block_on(async move {
+        // Connect
+        let config = russh::client::Config {
+            inactivity_timeout: Some(std::time::Duration::from_secs(3600)),
+            keepalive_interval: Some(std::time::Duration::from_secs(30)),
+            keepalive_max: 10,
+            ..Default::default()
+        };
+
+        let mut ssh = russh::client::connect(
+            Arc::new(config),
+            (profile.host.as_str(), profile.port),
+            SshHandler,
+        )
+        .await
+        .map_err(|e| format!("SSH connection failed: {}", e))?;
+
+        // Authenticate
+        let auth_result = match &profile.auth {
+            RemoteAuth::Password { password } => {
+                ssh.authenticate_password(&profile.user, password)
+                    .await
+                    .map_err(|e| format!("Password auth failed: {}", e))?
+            }
+            RemoteAuth::KeyFile { path, passphrase } => {
+                let key_path = if path.starts_with('~') {
+                    if let Some(home) = dirs::home_dir() {
+                        home.join(path.trim_start_matches('~').trim_start_matches('/'))
+                    } else {
+                        std::path::PathBuf::from(path)
+                    }
+                } else {
+                    std::path::PathBuf::from(path)
+                };
+
+                let key_pair = if let Some(pass) = passphrase {
+                    russh_keys::load_secret_key(&key_path, Some(pass))
+                        .map_err(|e| format!("Failed to load key: {}", e))?
+                } else {
+                    russh_keys::load_secret_key(&key_path, None)
+                        .map_err(|e| format!("Failed to load key: {}", e))?
+                };
+
+                ssh.authenticate_publickey(&profile.user, Arc::new(key_pair))
+                    .await
+                    .map_err(|e| format!("Key auth failed: {}", e))?
+            }
+        };
+
+        if !auth_result {
+            return Err("Authentication rejected by server".to_string());
+        }
+
+        debug_log("SSH authenticated, opening session channel...");
+
+        let mut channel = ssh.channel_open_session()
+            .await
+            .map_err(|e| format!("Failed to open channel: {}", e))?;
+
+        // Build remote command string
+        let claude_bin = profile.claude_path.as_deref().unwrap_or("claude");
+
+        // Build escaped args
+        let escaped_args: Vec<String> = args.iter().map(|a| shell_escape(a)).collect();
+
+        // Source shell profile to get PATH (SSH non-login shell doesn't load it)
+        // For tilde paths (~ or ~/...), don't shell-escape so tilde expansion works
+        let cd_part = if working_dir == "~" {
+            String::new()
+        } else if working_dir.starts_with("~/") {
+            format!("cd {} && ", working_dir)
+        } else {
+            format!("cd {} && ", shell_escape(&working_dir))
+        };
+        let cmd = format!(
+            "{{ [ -f ~/.zshrc ] && source ~/.zshrc; [ -f ~/.bashrc ] && source ~/.bashrc; }} 2>/dev/null; {}CLAUDE_CODE_MAX_OUTPUT_TOKENS=64000 BASH_DEFAULT_TIMEOUT_MS=86400000 BASH_MAX_TIMEOUT_MS=86400000 {} {}",
+            cd_part,
+            claude_bin,
+            escaped_args.join(" ")
+        );
+
+        debug_log(&format!("Remote command: {}", &cmd[..cmd.len().min(300)]));
+
+        channel.exec(true, cmd)
+            .await
+            .map_err(|e| format!("Failed to exec command: {}", e))?;
+
+        // Write prompt to stdin, then close stdin
+        channel.data(&prompt.into_bytes()[..])
+            .await
+            .map_err(|e| format!("Failed to send stdin: {}", e))?;
+        channel.eof()
+            .await
+            .map_err(|e| format!("Failed to close stdin: {}", e))?;
+
+        debug_log("Prompt written to remote stdin, reading output...");
+
+        // Read output
+        let mut line_buf = Vec::new();
+        let mut stderr_buf = Vec::new();
+        let mut exit_status: Option<u32> = None;
+        let mut line_state = StreamLineState::new();
+
+        while let Some(msg) = channel.wait().await {
+            // Check cancellation
+            if let Some(ref token) = cancel_token_inner {
+                if token.cancelled.load(Ordering::Relaxed) {
+                    debug_log("Cancel detected — closing SSH channel");
+                    ssh_cancel.store(true, Ordering::Relaxed);
+                    let _ = channel.close().await;
+                    return Ok(());
+                }
+            }
+
+            match msg {
+                russh::ChannelMsg::Data { ref data } => {
+                    // Accumulate stdout bytes and process complete lines
+                    line_buf.extend_from_slice(data);
+
+                    // Process complete lines
+                    while let Some(pos) = line_buf.iter().position(|&b| b == b'\n') {
+                        let line_bytes: Vec<u8> = line_buf.drain(..=pos).collect();
+                        if let Ok(line) = String::from_utf8(line_bytes) {
+                            let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+                            if !process_stream_line(trimmed, &sender, &mut line_state) {
+                                debug_log("Channel disconnected, stopping remote read");
+                                let _ = channel.close().await;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+                russh::ChannelMsg::ExtendedData { data, ext } => {
+                    if ext == 1 {
+                        stderr_buf.extend_from_slice(&data);
+                    }
+                }
+                russh::ChannelMsg::ExitStatus { exit_status: s } => {
+                    exit_status = Some(s);
+                }
+                _ => {}
+            }
+        }
+
+        // Process any remaining data in the buffer
+        if !line_buf.is_empty() {
+            if let Ok(line) = String::from_utf8(line_buf) {
+                let trimmed = line.trim_end_matches('\n').trim_end_matches('\r');
+                let _ = process_stream_line(trimmed, &sender, &mut line_state);
+            }
+        }
+
+        debug_log(&format!("Remote process exit_status: {:?}", exit_status));
+
+        // Handle errors
+        let success = exit_status.map_or(false, |s| s == 0);
+        if line_state.stdout_error.is_some() || !success {
+            let stderr_msg = String::from_utf8_lossy(&stderr_buf).to_string();
+            let (message, stdout_raw) = if let Some((msg, raw)) = line_state.stdout_error {
+                (msg, raw)
+            } else {
+                (format!("Remote process exited with code {:?}", exit_status), String::new())
+            };
+            let _ = sender.send(StreamMessage::Error {
+                message,
+                stdout: stdout_raw,
+                stderr: stderr_msg,
+                exit_code: exit_status.map(|s| s as i32),
+            });
+            return Ok(());
+        }
+
+        // If we didn't get a proper Done message, send one
+        if line_state.final_result.is_none() {
+            let _ = sender.send(StreamMessage::Done {
+                result: String::new(),
+                session_id: line_state.last_session_id,
+            });
+        }
+
+        debug_log("=== execute_streaming_remote END (success) ===");
+        Ok(())
+    })
 }
 
 /// Parse a stream-json line into a StreamMessage

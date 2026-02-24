@@ -34,6 +34,8 @@ struct DiscordSession {
     channel_name: Option<String>,
     /// Discord parent category name (for webui room grouping)
     category_name: Option<String>,
+    /// Remote profile name for SSH execution (None = local)
+    remote_profile_name: Option<String>,
 }
 
 /// Bot-level settings persisted to disk
@@ -223,20 +225,29 @@ fn risk_badge(destructive: bool) -> &'static str {
 
 /// Claude Code built-in slash commands
 const BUILTIN_SKILLS: &[(&str, &str)] = &[
+    ("clear",       "Clear conversation context and start fresh"),
     ("compact",     "Compact conversation to reduce context"),
+    ("context",     "Visualize current context usage"),
     ("cost",        "Show token usage and cost for this session"),
+    ("diff",        "View uncommitted changes and per-turn diffs"),
     ("doctor",      "Check Claude Code health and configuration"),
+    ("export",      "Export conversation to file"),
+    ("fast",        "Toggle fast output mode"),
+    ("files",       "List all files currently in context"),
+    ("fork",        "Create a fork of the current conversation"),
     ("init",        "Initialize project with CLAUDE.md guide"),
-    ("login",       "Switch Anthropic accounts"),
-    ("logout",      "Sign out from Anthropic account"),
     ("memory",      "Edit CLAUDE.md memory files"),
     ("model",       "Switch AI model"),
     ("permissions", "View and manage tool permissions"),
+    ("plan",        "Enable plan mode or view current plan"),
     ("pr-comments", "View PR comments for current branch"),
+    ("rename",      "Rename the current conversation"),
     ("review",      "Code review for uncommitted changes"),
+    ("skills",      "List available skills"),
+    ("stats",       "Show usage statistics"),
     ("status",      "Show session status and git info"),
-    ("terminal-setup", "Install Shift+Enter key binding"),
-    ("vim",         "Toggle vim keybinding mode"),
+    ("todos",       "List current todo items"),
+    ("usage",       "Show plan usage limits"),
 ];
 
 /// Extract a description from a skill .md file.
@@ -403,8 +414,15 @@ pub async fn run_bot(token: &str) {
             let ctx_clone = ctx.clone();
             let shared_for_migrate = shared_clone.clone();
             Box::pin(async move {
-                poise::builtins::register_globally(ctx, &framework.options().commands).await?;
-                println!("  ✓ Bot connected — Listening for messages");
+                // Register in each guild for instant slash command propagation
+                // (register_globally can take up to 1 hour)
+                let commands = &framework.options().commands;
+                for guild in &_ready.guilds {
+                    if let Err(e) = poise::builtins::register_in_guild(ctx, commands, guild.id).await {
+                        eprintln!("  ⚠ Failed to register commands in guild {}: {}", guild.id, e);
+                    }
+                }
+                println!("  ✓ Bot connected — Registered commands in {} guild(s)", _ready.guilds.len());
 
                 // Background: resolve category names for all known channels
                 tokio::spawn(async move {
@@ -580,11 +598,36 @@ async fn handle_event(
 
 // ─── Slash commands ──────────────────────────────────────────────────────────
 
-/// /start [path] — Start session at directory
+/// Autocomplete handler for remote profile names in /start
+async fn autocomplete_remote_profile<'a>(
+    _ctx: Context<'a>,
+    partial: &'a str,
+) -> Vec<serenity::AutocompleteChoice> {
+    let settings = crate::config::Settings::load();
+    let partial_lower = partial.to_lowercase();
+    let mut choices = Vec::new();
+    if partial.is_empty() || "off".contains(&partial_lower) {
+        choices.push(serenity::AutocompleteChoice::new("off (local execution)", "off"));
+    }
+    for p in &settings.remote_profiles {
+        if partial.is_empty() || p.name.to_lowercase().contains(&partial_lower) {
+            choices.push(serenity::AutocompleteChoice::new(
+                format!("{} — {}@{}:{}", p.name, p.user, p.host, p.port),
+                p.name.clone(),
+            ));
+        }
+    }
+    choices.into_iter().take(25).collect()
+}
+
+/// /start [path] [remote] — Start session at directory
 #[poise::command(slash_command, rename = "start")]
 async fn cmd_start(
     ctx: Context<'_>,
     #[description = "Directory path (empty for auto workspace)"] path: Option<String>,
+    #[description = "Remote profile ('off' for local)"]
+    #[autocomplete = "autocomplete_remote_profile"]
+    remote: Option<String>,
 ) -> Result<(), Error> {
     let user_id = ctx.author().id;
     let user_name = &ctx.author().name;
@@ -593,12 +636,50 @@ async fn cmd_start(
     }
 
     let ts = chrono::Local::now().format("%H:%M:%S");
-    println!("  [{ts}] ◀ [{user_name}] /start");
+    println!("  [{ts}] ◀ [{user_name}] /start path={:?} remote={:?}", path, remote);
 
     let path_str = path.as_deref().unwrap_or("").trim();
 
-    let canonical_path = if path_str.is_empty() {
-        // Create random workspace directory
+    // remote_override: None=not specified, Some(None)="off", Some(Some(name))=profile
+    let remote_override = match remote.as_deref() {
+        None => None,
+        Some("off") => Some(None),
+        Some(name) => {
+            let settings = crate::config::Settings::load();
+            if settings.remote_profiles.iter().any(|p| p.name == name) {
+                Some(Some(name.to_string()))
+            } else {
+                ctx.say(format!("Remote profile '{}' not found.", name)).await?;
+                return Ok(());
+            }
+        }
+    };
+
+    // Determine if session will be remote (for path validation logic)
+    let will_be_remote = match &remote_override {
+        Some(Some(_)) => true,
+        Some(None) => false,
+        None => {
+            let data = ctx.data().shared.lock().await;
+            data.sessions.get(&ctx.channel_id())
+                .and_then(|s| s.remote_profile_name.as_ref())
+                .is_some()
+        }
+    };
+
+    let canonical_path = if path_str.is_empty() && will_be_remote {
+        // Remote + no path: use profile's default_path or "~"
+        if let Some(Some(ref name)) = remote_override {
+            let settings = crate::config::Settings::load();
+            settings.remote_profiles.iter()
+                .find(|p| p.name == *name)
+                .map(|p| if p.default_path.is_empty() { "~".to_string() } else { p.default_path.clone() })
+                .unwrap_or_else(|| "~".to_string())
+        } else {
+            "~".to_string()
+        }
+    } else if path_str.is_empty() {
+        // Local + no path: create random workspace directory
         let Some(home) = dirs::home_dir() else {
             ctx.say("Error: cannot determine home directory.").await?;
             return Ok(());
@@ -616,8 +697,16 @@ async fn cmd_start(
             return Ok(());
         }
         new_dir.display().to_string()
+    } else if will_be_remote {
+        // Remote + path specified: expand tilde only, skip local validation
+        if path_str.starts_with("~/") || path_str == "~" {
+            // Keep tilde as-is for remote (remote shell will expand it)
+            path_str.to_string()
+        } else {
+            path_str.to_string()
+        }
     } else {
-        // Expand ~ to home directory
+        // Local + path specified: expand ~ and validate locally
         let expanded = if path_str.starts_with("~/") || path_str == "~" {
             if let Some(home) = dirs::home_dir() {
                 home.join(path_str.strip_prefix("~/").unwrap_or("")).display().to_string()
@@ -649,6 +738,9 @@ async fn cmd_start(
         let mut data = ctx.data().shared.lock().await;
         let channel_id = ctx.channel_id();
 
+        // Check if session already exists in memory (e.g. user already ran /remote off)
+        let session_existed = data.sessions.contains_key(&channel_id);
+
         let session = data.sessions.entry(channel_id).or_insert_with(|| DiscordSession {
             session_id: None,
             current_path: None,
@@ -657,18 +749,45 @@ async fn cmd_start(
             cleared: false,
             channel_name: None,
             category_name: None,
+            remote_profile_name: None,
         });
         session.channel_name = ch_name;
         session.category_name = cat_name;
 
+        // Apply remote override from /start parameter
+        if let Some(ref new_remote) = remote_override {
+            let old_remote = session.remote_profile_name.clone();
+            session.remote_profile_name = new_remote.clone();
+            if old_remote != *new_remote {
+                session.session_id = None;
+            }
+        }
+
         if let Some((session_data, _)) = &existing {
-            session.session_id = Some(session_data.session_id.clone());
             session.current_path = Some(canonical_path.clone());
             session.history = session_data.history.clone();
+            // Only restore remote_profile_name from file if session is newly created.
+            // If session already existed in memory, the user may have explicitly set
+            // remote to off (/remote off), so don't overwrite with saved value.
+            if !session_existed && session.remote_profile_name.is_none() {
+                session.remote_profile_name = session_data.remote_profile_name.clone();
+            }
+            // Only restore session_id if remote context matches
+            // (don't resume a remote session locally or vice versa)
+            let saved_is_remote = session_data.remote_profile_name.is_some();
+            let current_is_remote = session.remote_profile_name.is_some();
+            if saved_is_remote == current_is_remote {
+                session.session_id = Some(session_data.session_id.clone());
+            } else {
+                session.session_id = None; // Mismatch: start fresh
+            }
 
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ▶ Session restored: {canonical_path}");
-            response_lines.push(format!("Session restored at `{}`.", canonical_path));
+            let remote_info = session.remote_profile_name.as_ref()
+                .map(|n| format!(" (remote: {})", n))
+                .unwrap_or_default();
+            println!("  [{ts}] ▶ Session restored: {canonical_path}{remote_info}");
+            response_lines.push(format!("Session restored at `{}`{}.", canonical_path, remote_info));
             response_lines.push(String::new());
 
             // Show last 5 conversation items
@@ -693,8 +812,11 @@ async fn cmd_start(
             session.history.clear();
 
             let ts = chrono::Local::now().format("%H:%M:%S");
-            println!("  [{ts}] ▶ Session started: {canonical_path}");
-            response_lines.push(format!("Session started at `{}`.", canonical_path));
+            let remote_info = session.remote_profile_name.as_ref()
+                .map(|n| format!(" (remote: {})", n))
+                .unwrap_or_default();
+            println!("  [{ts}] ▶ Session started: {canonical_path}{remote_info}");
+            response_lines.push(format!("Session started at `{}`{}.", canonical_path, remote_info));
         }
 
         // Persist channel → path mapping for auto-restore
@@ -723,13 +845,22 @@ async fn cmd_pwd(ctx: Context<'_>) -> Result<(), Error> {
     let ts = chrono::Local::now().format("%H:%M:%S");
     println!("  [{ts}] ◀ [{user_name}] /pwd");
 
-    let current_path = {
+    let (current_path, remote_name) = {
         let data = ctx.data().shared.lock().await;
-        data.sessions.get(&ctx.channel_id()).and_then(|s| s.current_path.clone())
+        let session = data.sessions.get(&ctx.channel_id());
+        (
+            session.and_then(|s| s.current_path.clone()),
+            session.and_then(|s| s.remote_profile_name.clone()),
+        )
     };
 
     match current_path {
-        Some(path) => ctx.say(&path).await?,
+        Some(path) => {
+            let remote_info = remote_name
+                .map(|n| format!(" (remote: **{}**)", n))
+                .unwrap_or_else(|| " (local)".to_string());
+            ctx.say(format!("`{}`{}", path, remote_info)).await?
+        }
         None => ctx.say("No active session. Use `/start <path>` first.").await?,
     };
     Ok(())
@@ -1134,7 +1265,7 @@ Manage server files & chat with Claude AI.
 Each channel gets its own independent Claude Code session.
 
 **Session**
-`/start <path>` — Start session at directory
+`/start <path> [remote]` — Start session at directory
 `/start` — Start with auto-generated workspace
 `/pwd` — Show current working directory
 `/clear` — Clear AI conversation history
@@ -1208,6 +1339,93 @@ async fn cmd_cc(
     let ts = chrono::Local::now().format("%H:%M:%S");
     let args_str = args.as_deref().unwrap_or("");
     println!("  [{ts}] ◀ [{user_name}] /cc {skill} {args_str}");
+
+    // Handle built-in commands directly instead of sending to AI
+    match skill.as_str() {
+        "clear" => {
+            let channel_id = ctx.channel_id();
+            let cancel_token = {
+                let data = ctx.data().shared.lock().await;
+                data.cancel_tokens.get(&channel_id).cloned()
+            };
+            if let Some(token) = cancel_token {
+                token.cancelled.store(true, Ordering::Relaxed);
+                if let Ok(guard) = token.child_pid.lock() {
+                    if let Some(pid) = *guard {
+                        #[cfg(unix)]
+                        unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+                    }
+                }
+            }
+            {
+                let mut data = ctx.data().shared.lock().await;
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    session.session_id = None;
+                    session.history.clear();
+                    session.pending_uploads.clear();
+                    session.cleared = true;
+                }
+                data.cancel_tokens.remove(&channel_id);
+            }
+            ctx.say("Session cleared.").await?;
+            println!("  [{ts}] ▶ [{user_name}] Session cleared");
+            return Ok(());
+        }
+        "stop" => {
+            let channel_id = ctx.channel_id();
+            let token = {
+                let data = ctx.data().shared.lock().await;
+                data.cancel_tokens.get(&channel_id).cloned()
+            };
+            match token {
+                Some(token) => {
+                    if token.cancelled.load(Ordering::Relaxed) {
+                        ctx.say("Already stopping...").await?;
+                        return Ok(());
+                    }
+                    ctx.say("Stopping...").await?;
+                    token.cancelled.store(true, Ordering::Relaxed);
+                    if let Ok(guard) = token.child_pid.lock() {
+                        if let Some(pid) = *guard {
+                            #[cfg(unix)]
+                            unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+                        }
+                    }
+                    println!("  [{ts}] ■ Cancel signal sent");
+                }
+                None => {
+                    ctx.say("No active request to stop.").await?;
+                }
+            }
+            return Ok(());
+        }
+        "pwd" => {
+            let (current_path, remote_name) = {
+                let data = ctx.data().shared.lock().await;
+                let session = data.sessions.get(&ctx.channel_id());
+                (
+                    session.and_then(|s| s.current_path.clone()),
+                    session.and_then(|s| s.remote_profile_name.clone()),
+                )
+            };
+            match current_path {
+                Some(path) => {
+                    let remote_info = remote_name
+                        .map(|n| format!(" (remote: **{}**)", n))
+                        .unwrap_or_else(|| " (local)".to_string());
+                    ctx.say(format!("`{}`{}", path, remote_info)).await?
+                }
+                None => ctx.say("No active session. Use `/start <path>` first.").await?,
+            };
+            return Ok(());
+        }
+        "help" => {
+            // Redirect to help — just tell user to use /help
+            ctx.say("Use `/help` to see all commands.").await?;
+            return Ok(());
+        }
+        _ => {}
+    }
 
     // Verify skill exists
     let skill_exists = {
@@ -1403,6 +1621,19 @@ async fn handle_text_message(
         crate::services::webui::push_status_by_session(sid, "active");
     }
 
+    // Resolve remote profile for this channel
+    let remote_profile = {
+        let data = shared.lock().await;
+        data.sessions.get(&channel_id)
+            .and_then(|s| s.remote_profile_name.as_ref())
+            .and_then(|name| {
+                let settings = crate::config::Settings::load();
+                settings.remote_profiles.iter()
+                    .find(|p| p.name == *name)
+                    .cloned()
+            })
+    };
+
     // Create channel for streaming
     let (tx, rx) = mpsc::channel();
 
@@ -1420,6 +1651,7 @@ async fn handle_text_message(
             Some(&system_prompt_owned),
             Some(&allowed_tools),
             Some(cancel_token_clone),
+            remote_profile.as_ref(),
         );
 
         if let Err(e) = result {
@@ -1508,8 +1740,12 @@ async fn handle_text_message(
                                 }
                                 done = true;
                             }
-                            StreamMessage::Error { message, .. } => {
-                                full_response = format!("Error: {}", message);
+                            StreamMessage::Error { message, stderr, .. } => {
+                                if !stderr.is_empty() {
+                                    full_response = format!("Error: {}\nstderr: {}", message, &stderr[..stderr.len().min(500)]);
+                                } else {
+                                    full_response = format!("Error: {}", message);
+                                }
                                 done = true;
                             }
                             StreamMessage::StatusUpdate { model, cost_usd, total_cost_usd, duration_ms, num_turns, input_tokens, output_tokens } => {
@@ -1925,6 +2161,7 @@ async fn auto_restore_session(
                 cleared: false,
                 channel_name: ch_name,
                 category_name: cat_name,
+                remote_profile_name: None,
             });
             session.current_path = Some(last_path.clone());
             if let Some((session_data, _)) = existing {
@@ -2126,6 +2363,26 @@ fn save_session_to_file(session: &DiscordSession, current_path: &str) {
         (session.channel_name.clone(), session.category_name.clone())
     };
 
+    // Clean up old session files for the same channel (different session_id)
+    if let Some(ref ch_name) = effective_channel_name {
+        if let Ok(entries) = fs::read_dir(&sessions_dir) {
+            for entry in entries.filter_map(|e| e.ok()) {
+                let path = entry.path();
+                if path.extension().map(|e| e == "json").unwrap_or(false) {
+                    let fname = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+                    if fname == session_id { continue; } // keep current
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        if let Ok(old) = serde_json::from_str::<SessionData>(&content) {
+                            if old.discord_channel_name.as_deref() == Some(ch_name) {
+                                let _ = fs::remove_file(&path);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let session_data = SessionData {
         session_id: session_id.clone(),
         history: saveable_history,
@@ -2134,6 +2391,7 @@ fn save_session_to_file(session: &DiscordSession, current_path: &str) {
         discord_channel_id: None,
         discord_channel_name: effective_channel_name,
         discord_category_name: effective_category_name,
+        remote_profile_name: session.remote_profile_name.clone(),
     };
 
     if let Ok(json) = serde_json::to_string_pretty(&session_data) {
