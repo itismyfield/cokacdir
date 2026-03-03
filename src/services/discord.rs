@@ -816,6 +816,7 @@ async fn handle_event(
                 channel_id,
                 new_message.id,
                 user_id,
+                user_name,
                 text,
                 &data.shared,
                 &data.token,
@@ -1844,6 +1845,7 @@ async fn cmd_cc(
         ctx.channel_id(),
         confirm.id,
         ctx.author().id,
+        &ctx.author().name,
         &skill_prompt,
         &ctx.data().shared,
         &ctx.data().token,
@@ -1861,6 +1863,7 @@ async fn handle_text_message(
     channel_id: ChannelId,
     user_msg_id: MessageId,
     request_owner: UserId,
+    request_owner_name: &str,
     user_text: &str,
     shared: &Arc<Mutex<SharedData>>,
     token: &str,
@@ -1970,9 +1973,31 @@ async fn handle_text_message(
         }
     };
 
+    // Build Discord context info
+    let discord_context = {
+        let data = shared.lock().await;
+        let session = data.sessions.get(&channel_id);
+        let ch_name = session.and_then(|s| s.channel_name.as_deref());
+        let cat_name = session.and_then(|s| s.category_name.as_deref());
+        match ch_name {
+            Some(name) => {
+                let cat_part = cat_name.map(|c| format!(" (category: {})", c)).unwrap_or_default();
+                format!(
+                    "Discord context: channel #{} (ID: {}){}, user: {} (ID: {})",
+                    name, channel_id.get(), cat_part, request_owner_name, request_owner.get()
+                )
+            }
+            None => format!(
+                "Discord context: DM, user: {} (ID: {})",
+                request_owner_name, request_owner.get()
+            ),
+        }
+    };
+
     // Build system prompt
     let system_prompt_owned = format!(
         "You are chatting with a user through Discord.\n\
+         {}\n\
          Current working directory: {}\n\n\
          When your work produces a file the user would want (generated code, reports, images, archives, etc.),\n\
          send it by running this bash command:\n\n\
@@ -1985,7 +2010,7 @@ async fn handle_text_message(
          IMPORTANT: The user is on Discord and CANNOT interact with any interactive prompts, dialogs, or confirmation requests. \
          All tools that require user interaction (such as AskUserQuestion, EnterPlanMode, ExitPlanMode) will NOT work. \
          Never use tools that expect user interaction. If you need clarification, just ask in plain text.{}{}",
-        current_path, channel_id.get(), discord_token_hash(token), disabled_notice, skills_notice
+        discord_context, current_path, channel_id.get(), discord_token_hash(token), disabled_notice, skills_notice
     );
 
     // Create cancel token
