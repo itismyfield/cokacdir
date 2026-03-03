@@ -4,6 +4,7 @@ use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use sha2::{Digest, Sha256};
 use tokio::sync::Mutex;
@@ -16,6 +17,9 @@ use crate::ui::ai_screen::{self, HistoryItem, HistoryType, SessionData};
 
 /// Discord message length limit
 const DISCORD_MSG_LIMIT: usize = 2000;
+const MAX_INTERVENTIONS_PER_CHANNEL: usize = 3;
+const INTERVENTION_TTL: Duration = Duration::from_secs(10 * 60);
+const INTERVENTION_DEDUP_WINDOW: Duration = Duration::from_secs(10);
 
 /// Per-channel session state
 struct DiscordSession {
@@ -23,11 +27,26 @@ struct DiscordSession {
     current_path: Option<String>,
     history: Vec<HistoryItem>,
     pending_uploads: Vec<String>,
+    pending_interventions: Vec<String>,
     cleared: bool,
     /// Remote profile name for SSH execution (None = local)
     remote_profile_name: Option<String>,
     channel_name: Option<String>,
     category_name: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InterventionMode {
+    Soft,
+    Hard,
+}
+
+#[derive(Clone, Debug)]
+struct Intervention {
+    author_id: UserId,
+    text: String,
+    mode: InterventionMode,
+    created_at: Instant,
 }
 
 /// Bot-level settings persisted to disk
@@ -77,6 +96,10 @@ struct SharedData {
     settings: DiscordBotSettings,
     /// Per-channel cancel tokens for in-progress AI requests
     cancel_tokens: HashMap<ChannelId, Arc<CancelToken>>,
+    /// Per-channel owner of the currently running request
+    active_request_owner: HashMap<ChannelId, UserId>,
+    /// Per-channel steering interventions collected while a request is in progress
+    intervention_queue: HashMap<ChannelId, Vec<Intervention>>,
     /// Per-channel timestamps of the last Discord API call (for rate limiting)
     api_timestamps: HashMap<ChannelId, tokio::time::Instant>,
     /// Cached skill list: (name, description)
@@ -216,6 +239,41 @@ pub fn resolve_discord_token_by_hash(hash: &str) -> Option<String> {
 }
 
 /// Normalize tool name: first letter uppercase, rest lowercase
+fn is_hard_intervention(text: &str) -> bool {
+    let t = text.to_lowercase();
+    let hard_keywords = ["중단", "멈춰", "취소", "stop", "abort", "cancel"];
+    hard_keywords.iter().any(|k| t.contains(k))
+}
+
+fn prune_interventions(queue: &mut Vec<Intervention>) {
+    let now = Instant::now();
+    queue.retain(|i| now.duration_since(i.created_at) <= INTERVENTION_TTL);
+    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
+        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
+        queue.drain(0..overflow);
+    }
+}
+
+fn enqueue_intervention(queue: &mut Vec<Intervention>, intervention: Intervention) -> bool {
+    prune_interventions(queue);
+
+    if let Some(last) = queue.last() {
+        if last.author_id == intervention.author_id
+            && last.text == intervention.text
+            && intervention.created_at.duration_since(last.created_at) <= INTERVENTION_DEDUP_WINDOW
+        {
+            return false;
+        }
+    }
+
+    queue.push(intervention);
+    if queue.len() > MAX_INTERVENTIONS_PER_CHANNEL {
+        let overflow = queue.len() - MAX_INTERVENTIONS_PER_CHANNEL;
+        queue.drain(0..overflow);
+    }
+    true
+}
+
 fn normalize_tool_name(name: &str) -> String {
     let lower = name.to_lowercase();
     let mut chars = lower.chars();
@@ -444,6 +502,8 @@ pub async fn run_bot(token: &str) {
         sessions: HashMap::new(),
         settings: bot_settings,
         cancel_tokens: HashMap::new(),
+        active_request_owner: HashMap::new(),
+        intervention_queue: HashMap::new(),
         api_timestamps: HashMap::new(),
         skills_cache: initial_skills,
         tmux_watchers: HashMap::new(),
@@ -652,14 +712,87 @@ async fn handle_event(
             // Auto-restore session
             auto_restore_session(&data.shared, channel_id, ctx).await;
 
-            // Block messages while AI is in progress for this channel
+            // Steering while AI is in progress for this channel
             {
-                let d = data.shared.lock().await;
+                let mut d = data.shared.lock().await;
                 if d.cancel_tokens.contains_key(&channel_id) {
+                    let request_owner = d.active_request_owner.get(&channel_id).copied();
+                    if let Some(owner_id) = request_owner {
+                        if owner_id != user_id {
+                            drop(d);
+                            rate_limit_wait(&data.shared, channel_id).await;
+                            let _ = channel_id
+                                .say(
+                                    &ctx.http,
+                                    format!(
+                                        "AI request in progress. Only <@{}> can steer this turn.",
+                                        owner_id.get()
+                                    ),
+                                )
+                                .await;
+                            return Ok(());
+                        }
+                    }
+
+                    let mode = if is_hard_intervention(text) {
+                        InterventionMode::Hard
+                    } else {
+                        InterventionMode::Soft
+                    };
+
+                    let (inserted, queued_count, hard_token) = {
+                        let queue = d.intervention_queue.entry(channel_id).or_default();
+                        let inserted = enqueue_intervention(
+                            queue,
+                            Intervention {
+                                author_id: user_id,
+                                text: text.to_string(),
+                                mode,
+                                created_at: Instant::now(),
+                            },
+                        );
+                        let queued_count = queue.len();
+                        let hard_token = if mode == InterventionMode::Hard {
+                            d.cancel_tokens.get(&channel_id).cloned()
+                        } else {
+                            None
+                        };
+                        (inserted, queued_count, hard_token)
+                    };
+
+                    if let Some(token) = hard_token {
+                        token.cancelled.store(true, Ordering::Relaxed);
+                        if let Ok(guard) = token.child_pid.lock() {
+                            if let Some(pid) = *guard {
+                                #[cfg(unix)]
+                                unsafe {
+                                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                                }
+                            }
+                        }
+                    }
+
                     drop(d);
+
+                    if !inserted {
+                        rate_limit_wait(&data.shared, channel_id).await;
+                        let _ = channel_id
+                            .say(&ctx.http, "↪ 같은 steering이 방금 이미 들어와서 무시했어.")
+                            .await;
+                        return Ok(());
+                    }
+
                     rate_limit_wait(&data.shared, channel_id).await;
+                    let feedback = match mode {
+                        InterventionMode::Hard => {
+                            "🛑 hard steering 받았어. 현재 작업을 중단할게."
+                        }
+                        InterventionMode::Soft => {
+                            "📝 steering 저장됨. 현재 턴 종료 후 다음 요청에 반영할게."
+                        }
+                    };
                     let _ = channel_id
-                        .say(&ctx.http, "AI request in progress. Use `/stop` to cancel.")
+                        .say(&ctx.http, format!("{} (queue: {})", feedback, queued_count))
                         .await;
                     return Ok(());
                 }
@@ -682,6 +815,7 @@ async fn handle_event(
                 ctx,
                 channel_id,
                 new_message.id,
+                user_id,
                 text,
                 &data.shared,
                 &data.token,
@@ -867,6 +1001,7 @@ async fn cmd_start(
                 current_path: None,
                 history: Vec::new(),
                 pending_uploads: Vec::new(),
+                pending_interventions: Vec::new(),
                 cleared: false,
                 channel_name: None,
                 category_name: None,
@@ -1066,9 +1201,12 @@ async fn cmd_clear(ctx: Context<'_>) -> Result<(), Error> {
             session.session_id = None;
             session.history.clear();
             session.pending_uploads.clear();
+            session.pending_interventions.clear();
             session.cleared = true;
         }
         data.cancel_tokens.remove(&channel_id);
+        data.active_request_owner.remove(&channel_id);
+        data.intervention_queue.remove(&channel_id);
     }
 
     ctx.say("Session cleared.").await?;
@@ -1561,9 +1699,12 @@ async fn cmd_cc(
                     session.session_id = None;
                     session.history.clear();
                     session.pending_uploads.clear();
+                    session.pending_interventions.clear();
                     session.cleared = true;
                 }
                 data.cancel_tokens.remove(&channel_id);
+                data.active_request_owner.remove(&channel_id);
+                data.intervention_queue.remove(&channel_id);
             }
             ctx.say("Session cleared.").await?;
             println!("  [{ts}] ▶ [{user_name}] Session cleared");
@@ -1702,6 +1843,7 @@ async fn cmd_cc(
         ctx.serenity_context(),
         ctx.channel_id(),
         confirm.id,
+        ctx.author().id,
         &skill_prompt,
         &ctx.data().shared,
         &ctx.data().token,
@@ -1718,12 +1860,13 @@ async fn handle_text_message(
     ctx: &serenity::Context,
     channel_id: ChannelId,
     user_msg_id: MessageId,
+    request_owner: UserId,
     user_text: &str,
     shared: &Arc<Mutex<SharedData>>,
     token: &str,
 ) -> Result<(), Error> {
-    // Get session info, allowed tools, and pending uploads
-    let (session_info, allowed_tools, pending_uploads) = {
+    // Get session info, allowed tools, pending uploads, and pending steering notes
+    let (session_info, allowed_tools, pending_uploads, pending_interventions) = {
         let mut data = shared.lock().await;
         let info = data.sessions.get(&channel_id).and_then(|session| {
             session.current_path.as_ref().map(|_| {
@@ -1734,15 +1877,18 @@ async fn handle_text_message(
             })
         });
         let tools = data.settings.allowed_tools.clone();
-        let uploads = data
+        let (uploads, interventions) = data
             .sessions
             .get_mut(&channel_id)
             .map(|s| {
                 s.cleared = false;
-                std::mem::take(&mut s.pending_uploads)
+                (
+                    std::mem::take(&mut s.pending_uploads),
+                    std::mem::take(&mut s.pending_interventions),
+                )
             })
             .unwrap_or_default();
-        (info, tools, uploads)
+        (info, tools, uploads, interventions)
     };
 
     let (session_id, current_path) = match session_info {
@@ -1769,13 +1915,19 @@ async fn handle_text_message(
     // Sanitize input
     let sanitized_input = ai_screen::sanitize_user_input(user_text);
 
-    // Prepend pending file uploads
-    let context_prompt = if pending_uploads.is_empty() {
-        sanitized_input
-    } else {
-        let upload_context = pending_uploads.join("\n");
-        format!("{}\n\n{}", upload_context, sanitized_input)
-    };
+    // Prepend pending file uploads + steering notes
+    let mut context_chunks = Vec::new();
+    if !pending_uploads.is_empty() {
+        context_chunks.push(pending_uploads.join("\n"));
+    }
+    if !pending_interventions.is_empty() {
+        context_chunks.push(format!(
+            "[Queued steering notes]\n{}",
+            pending_interventions.join("\n")
+        ));
+    }
+    context_chunks.push(sanitized_input);
+    let context_prompt = context_chunks.join("\n\n");
 
     // Build disabled tools notice
     let default_tools: std::collections::HashSet<&str> =
@@ -1841,6 +1993,7 @@ async fn handle_text_message(
     {
         let mut data = shared.lock().await;
         data.cancel_tokens.insert(channel_id, cancel_token.clone());
+        data.active_request_owner.insert(channel_id, request_owner);
     }
 
     // Resolve remote profile for this channel
@@ -2120,11 +2273,38 @@ async fn handle_text_message(
             }
         }
 
-        // Remove cancel token for this channel
-        {
+        // Remove active token/owner and flush queued soft steering notes
+        let queued_soft_count = {
             let mut data = shared_owned.lock().await;
             data.cancel_tokens.remove(&channel_id);
-        }
+            data.active_request_owner.remove(&channel_id);
+
+            let queued = data.intervention_queue.remove(&channel_id).unwrap_or_default();
+            let soft_notes: Vec<String> = queued
+                .into_iter()
+                .filter(|i| i.mode == InterventionMode::Soft)
+                .map(|i| format!("[Steering] {}", i.text))
+                .collect();
+
+            if !soft_notes.is_empty() {
+                if let Some(session) = data.sessions.get_mut(&channel_id) {
+                    session.pending_interventions.extend(soft_notes);
+                    if session.pending_interventions.len() > MAX_INTERVENTIONS_PER_CHANNEL {
+                        let overflow =
+                            session.pending_interventions.len() - MAX_INTERVENTIONS_PER_CHANNEL;
+                        session.pending_interventions.drain(0..overflow);
+                    }
+                    if let Some(ref path) = session.current_path {
+                        save_session_to_file(session, path);
+                    }
+                }
+            }
+
+            data.sessions
+                .get(&channel_id)
+                .map(|s| s.pending_interventions.len())
+                .unwrap_or(0)
+        };
 
         // Remove hourglass reaction
         remove_reaction_raw(&http, channel_id, user_msg_id, '⏳').await;
@@ -2184,6 +2364,19 @@ async fn handle_text_message(
                 }
             }
 
+            if queued_soft_count > 0 {
+                rate_limit_wait(&shared_owned, channel_id).await;
+                let _ = channel_id
+                    .say(
+                        &http,
+                        format!(
+                            "✅ steering 반영 준비 완료 ({}개). 다음 요청에 자동 반영될게.",
+                            queued_soft_count
+                        ),
+                    )
+                    .await;
+            }
+
             return;
         }
 
@@ -2237,6 +2430,19 @@ async fn handle_text_message(
                     }
                 }
             }
+        }
+
+        if queued_soft_count > 0 {
+            rate_limit_wait(&shared_owned, channel_id).await;
+            let _ = channel_id
+                .say(
+                    &http,
+                    format!(
+                        "✅ steering 반영 준비 완료 ({}개). 다음 요청에 자동 반영될게.",
+                        queued_soft_count
+                    ),
+                )
+                .await;
         }
 
         let ts = chrono::Local::now().format("%H:%M:%S");
@@ -2485,6 +2691,7 @@ async fn auto_restore_session(
                     current_path: None,
                     history: Vec::new(),
                     pending_uploads: Vec::new(),
+                    pending_interventions: Vec::new(),
                     cleared: false,
                     channel_name: ch_name,
                     category_name: cat_name,
