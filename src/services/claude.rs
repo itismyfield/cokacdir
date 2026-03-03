@@ -44,26 +44,83 @@ fn get_claude_path() -> Option<&'static str> {
     CLAUDE_PATH.get_or_init(|| resolve_claude_path()).as_deref()
 }
 
-/// Debug logging helper (only active when COKACDIR_DEBUG=1)
+/// Global runtime debug flag — togglable via `/debug` command or COKACDIR_DEBUG=1 env var.
+static DEBUG_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Initialize debug flag from environment variable (call once at startup).
+pub fn init_debug_from_env() {
+    let enabled = std::env::var("COKACDIR_DEBUG")
+        .map(|v| v == "1")
+        .unwrap_or(false);
+    if enabled {
+        DEBUG_ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Toggle debug mode at runtime. Returns the new state.
+pub fn toggle_debug() -> bool {
+    let prev = DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed);
+    DEBUG_ENABLED.store(!prev, std::sync::atomic::Ordering::Relaxed);
+    !prev
+}
+
+/// Check if debug mode is currently enabled.
+pub fn is_debug_enabled() -> bool {
+    DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Debug logging helper — active when DEBUG_ENABLED is true.
 fn debug_log(msg: &str) {
-    static ENABLED: OnceLock<bool> = OnceLock::new();
-    let enabled = ENABLED.get_or_init(|| {
-        std::env::var("COKACDIR_DEBUG")
-            .map(|v| v == "1")
-            .unwrap_or(false)
-    });
-    if !*enabled {
+    if !DEBUG_ENABLED.load(std::sync::atomic::Ordering::Relaxed) {
         return;
     }
+    debug_log_to("claude.log", msg);
+}
+
+/// Write a debug message to a specific log file under ~/.remotecc/debug/.
+pub fn debug_log_to(filename: &str, msg: &str) {
     if let Some(home) = dirs::home_dir() {
         let debug_dir = home.join(".remotecc").join("debug");
         let _ = std::fs::create_dir_all(&debug_dir);
-        let log_path = debug_dir.join("claude.log");
+        let log_path = debug_dir.join(filename);
         if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(log_path) {
             let timestamp = chrono::Local::now().format("%H:%M:%S%.3f");
             let _ = writeln!(file, "[{}] {}", timestamp, msg);
         }
     }
+}
+
+/// Kill a process tree by PID.
+/// On Unix, sends SIGTERM to the process group, then SIGKILL as fallback.
+pub fn kill_pid_tree(pid: u32) {
+    #[cfg(unix)]
+    unsafe {
+        // Send SIGTERM to the process group (negative PID)
+        let ret = libc::kill(-(pid as libc::pid_t), libc::SIGTERM);
+        if ret != 0 {
+            // Fallback: kill just the process
+            libc::kill(pid as libc::pid_t, libc::SIGTERM);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        // On Windows, use taskkill /T to kill the tree
+        let _ = std::process::Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .output();
+    }
+}
+
+/// Kill a child process and its entire process tree.
+/// On Unix, sends SIGTERM to the process group first, then SIGKILL as fallback.
+pub fn kill_child_tree(child: &mut std::process::Child) {
+    kill_pid_tree(child.id());
+    // Give processes a moment to clean up, then force kill if needed
+    std::thread::sleep(std::time::Duration::from_millis(200));
+    if child.try_wait().ok().flatten().is_none() {
+        let _ = child.kill(); // SIGKILL
+    }
+    let _ = child.wait();
 }
 
 #[derive(Debug, Clone)]
@@ -600,9 +657,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
         // Check cancel token before processing each line
         if let Some(ref token) = cancel_token {
             if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-                debug_log("Cancel detected — killing child process");
-                let _ = child.kill();
-                let _ = child.wait();
+                debug_log("Cancel detected — killing child process tree");
+                kill_child_tree(&mut child);
                 return Ok(());
             }
         }
@@ -811,9 +867,8 @@ IMPORTANT: Format your responses using Markdown for better readability:
     // Check cancel token after exiting the loop
     if let Some(ref token) = cancel_token {
         if token.cancelled.load(std::sync::atomic::Ordering::Relaxed) {
-            debug_log("Cancel detected after loop — killing child process");
-            let _ = child.kill();
-            let _ = child.wait();
+            debug_log("Cancel detected after loop — killing child process tree");
+            kill_child_tree(&mut child);
             return Ok(());
         }
     }

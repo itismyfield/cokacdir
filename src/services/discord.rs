@@ -33,6 +33,8 @@ struct DiscordSession {
     remote_profile_name: Option<String>,
     channel_name: Option<String>,
     category_name: Option<String>,
+    /// Silent mode — when true, tool call details are suppressed from Discord messages
+    silent: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -487,6 +489,9 @@ fn scan_skills(project_path: Option<&str>) -> Vec<(String, String)> {
 
 /// Entry point: start the Discord bot
 pub async fn run_bot(token: &str) {
+    // Initialize debug logging from environment variable
+    claude::init_debug_from_env();
+
     let bot_settings = load_bot_settings(token);
 
     match bot_settings.owner_user_id {
@@ -524,6 +529,8 @@ pub async fn run_bot(token: &str) {
                 cmd_cc(),
                 cmd_allowedtools(),
                 cmd_allowed(),
+                cmd_debug(),
+                cmd_silent(),
                 cmd_adduser(),
                 cmd_removeuser(),
                 cmd_help(),
@@ -764,10 +771,7 @@ async fn handle_event(
                         token.cancelled.store(true, Ordering::Relaxed);
                         if let Ok(guard) = token.child_pid.lock() {
                             if let Some(pid) = *guard {
-                                #[cfg(unix)]
-                                unsafe {
-                                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                                }
+                                claude::kill_pid_tree(pid);
                             }
                         }
                     }
@@ -1007,6 +1011,7 @@ async fn cmd_start(
                 channel_name: None,
                 category_name: None,
                 remote_profile_name: None,
+                silent: false,
             });
         session.channel_name = ch_name;
         session.category_name = cat_name;
@@ -1188,10 +1193,7 @@ async fn cmd_clear(ctx: Context<'_>) -> Result<(), Error> {
         token.cancelled.store(true, Ordering::Relaxed);
         if let Ok(guard) = token.child_pid.lock() {
             if let Some(pid) = *guard {
-                #[cfg(unix)]
-                unsafe {
-                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                }
+                claude::kill_pid_tree(pid);
             }
         }
     }
@@ -1199,6 +1201,10 @@ async fn cmd_clear(ctx: Context<'_>) -> Result<(), Error> {
     {
         let mut data = ctx.data().shared.lock().await;
         if let Some(session) = data.sessions.get_mut(&channel_id) {
+            // Clean up session files on disk before clearing in-memory state
+            if let Some(ref path) = session.current_path {
+                cleanup_session_files(path, session.session_id.as_deref());
+            }
             session.session_id = None;
             session.history.clear();
             session.pending_uploads.clear();
@@ -1245,10 +1251,7 @@ async fn cmd_stop(ctx: Context<'_>) -> Result<(), Error> {
             token.cancelled.store(true, Ordering::Relaxed);
             if let Ok(guard) = token.child_pid.lock() {
                 if let Some(pid) = *guard {
-                    #[cfg(unix)]
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                    }
+                    claude::kill_pid_tree(pid);
                 }
             }
             println!("  [{ts}] ■ Cancel signal sent");
@@ -1593,6 +1596,55 @@ async fn cmd_removeuser(
     Ok(())
 }
 
+/// /debug — Toggle debug logging at runtime
+#[poise::command(slash_command, rename = "debug")]
+async fn cmd_debug(ctx: Context<'_>) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    println!("  [{ts}] ◀ [{user_name}] /debug");
+
+    let new_state = claude::toggle_debug();
+    let status = if new_state { "ON" } else { "OFF" };
+    ctx.say(format!("Debug logging: **{}**", status)).await?;
+    println!("  [{ts}] ▶ Debug logging toggled to {status}");
+    Ok(())
+}
+
+/// /silent — Toggle silent mode (hide tool call details in Discord)
+#[poise::command(slash_command, rename = "silent")]
+async fn cmd_silent(ctx: Context<'_>) -> Result<(), Error> {
+    let user_id = ctx.author().id;
+    let user_name = &ctx.author().name;
+    if !check_auth(user_id, user_name, &ctx.data().shared, &ctx.data().token).await {
+        return Ok(());
+    }
+
+    let ts = chrono::Local::now().format("%H:%M:%S");
+    println!("  [{ts}] ◀ [{user_name}] /silent");
+
+    let channel_id = ctx.channel_id();
+    let new_state = {
+        let mut data = ctx.data().shared.lock().await;
+        if let Some(session) = data.sessions.get_mut(&channel_id) {
+            session.silent = !session.silent;
+            session.silent
+        } else {
+            ctx.say("No active session. Use `/start` first.").await?;
+            return Ok(());
+        }
+    };
+
+    let status = if new_state { "ON" } else { "OFF" };
+    ctx.say(format!("Silent mode: **{}**", status)).await?;
+    println!("  [{ts}] ▶ Silent mode toggled to {status}");
+    Ok(())
+}
+
 /// /help — Show help information
 #[poise::command(slash_command, rename = "help")]
 async fn cmd_help(ctx: Context<'_>) -> Result<(), Error> {
@@ -1627,6 +1679,10 @@ AI can read, edit, and run commands in your session.
 
 **Skills**
 `/cc <skill>` — Run a Claude Code skill (autocomplete)
+
+**Settings**
+`/debug` — Toggle debug logging
+`/silent` — Toggle silent mode (hide tool details)
 
 **User Management** (owner only)
 `/adduser @user` — Allow a user to use the bot
@@ -1687,10 +1743,7 @@ async fn cmd_cc(
                 token.cancelled.store(true, Ordering::Relaxed);
                 if let Ok(guard) = token.child_pid.lock() {
                     if let Some(pid) = *guard {
-                        #[cfg(unix)]
-                        unsafe {
-                            libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                        }
+                        claude::kill_pid_tree(pid);
                     }
                 }
             }
@@ -1727,10 +1780,7 @@ async fn cmd_cc(
                     token.cancelled.store(true, Ordering::Relaxed);
                     if let Ok(guard) = token.child_pid.lock() {
                         if let Some(pid) = *guard {
-                            #[cfg(unix)]
-                            unsafe {
-                                libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                            }
+                            claude::kill_pid_tree(pid);
                         }
                     }
                     println!("  [{ts}] ■ Cancel signal sent");
@@ -2085,6 +2135,12 @@ async fn handle_text_message(
         }
     });
 
+    // Check silent mode for this channel
+    let is_silent = {
+        let data = shared.lock().await;
+        data.sessions.get(&channel_id).map(|s| s.silent).unwrap_or(false)
+    };
+
     // Spawn the polling loop
     let http = ctx.http.clone();
     let shared_owned = shared.clone();
@@ -2127,9 +2183,11 @@ async fn handle_text_message(
                                 full_response.push_str(&content);
                             }
                             StreamMessage::ToolUse { name, input } => {
-                                let summary = format_tool_input(&name, &input);
-                                let ts = chrono::Local::now().format("%H:%M:%S");
-                                println!("  [{ts}]   ⚙ {name}: {}", truncate_str(&summary, 80));
+                                if !is_silent {
+                                    let summary = format_tool_input(&name, &input);
+                                    let ts = chrono::Local::now().format("%H:%M:%S");
+                                    println!("  [{ts}]   ⚙ {name}: {}", truncate_str(&summary, 80));
+                                }
                                 // Ensure paragraph break between text blocks separated by tool calls
                                 if !full_response.is_empty() {
                                     let trimmed = full_response.trim_end();
@@ -2138,7 +2196,7 @@ async fn handle_text_message(
                                 }
                             }
                             StreamMessage::ToolResult { content, is_error } => {
-                                if is_error {
+                                if is_error && !is_silent {
                                     let ts = chrono::Local::now().format("%H:%M:%S");
                                     println!("  [{ts}]   ✗ Error: {}", truncate_str(&content, 80));
                                 }
@@ -2338,10 +2396,7 @@ async fn handle_text_message(
             // Kill child process
             if let Ok(guard) = cancel_token.child_pid.lock() {
                 if let Some(pid) = *guard {
-                    #[cfg(unix)]
-                    unsafe {
-                        libc::kill(pid as libc::pid_t, libc::SIGTERM);
-                    }
+                    claude::kill_pid_tree(pid);
                 }
             }
 
@@ -2721,6 +2776,7 @@ async fn auto_restore_session(
                     channel_name: ch_name,
                     category_name: cat_name,
                     remote_profile_name: saved_remote.clone(),
+                    silent: false,
                 });
             session.current_path = Some(last_path.clone());
             if let Some((session_data, _)) = existing {
@@ -2739,7 +2795,8 @@ async fn auto_restore_session(
     }
 }
 
-/// Load existing session from ai_sessions directory
+/// Load existing session from ai_sessions directory.
+/// Prefers sessions with a non-empty session_id. Among those, picks the most recently modified.
 fn load_existing_session(current_path: &str) -> Option<(SessionData, std::time::SystemTime)> {
     let sessions_dir = ai_screen::ai_sessions_dir()?;
 
@@ -2747,7 +2804,8 @@ fn load_existing_session(current_path: &str) -> Option<(SessionData, std::time::
         return None;
     }
 
-    let mut matching_session: Option<(SessionData, std::time::SystemTime)> = None;
+    let mut best_with_id: Option<(SessionData, std::time::SystemTime)> = None;
+    let mut best_without_id: Option<(SessionData, std::time::SystemTime)> = None;
 
     if let Ok(entries) = fs::read_dir(&sessions_dir) {
         for entry in entries.filter_map(|e| e.ok()) {
@@ -2758,10 +2816,12 @@ fn load_existing_session(current_path: &str) -> Option<(SessionData, std::time::
                         if session_data.current_path == current_path {
                             if let Ok(metadata) = path.metadata() {
                                 if let Ok(modified) = metadata.modified() {
-                                    match &matching_session {
-                                        None => matching_session = Some((session_data, modified)),
+                                    let has_id = !session_data.session_id.is_empty();
+                                    let target = if has_id { &mut best_with_id } else { &mut best_without_id };
+                                    match target {
+                                        None => *target = Some((session_data, modified)),
                                         Some((_, latest_time)) if modified > *latest_time => {
-                                            matching_session = Some((session_data, modified));
+                                            *target = Some((session_data, modified));
                                         }
                                         _ => {}
                                     }
@@ -2774,7 +2834,44 @@ fn load_existing_session(current_path: &str) -> Option<(SessionData, std::time::
         }
     }
 
-    matching_session
+    // Prefer sessions with a valid session_id
+    best_with_id.or(best_without_id)
+}
+
+/// Clean up stale session files for a given path, keeping only the one matching current_session_id.
+fn cleanup_session_files(current_path: &str, current_session_id: Option<&str>) {
+    let Some(sessions_dir) = ai_screen::ai_sessions_dir() else {
+        return;
+    };
+    if !sessions_dir.exists() {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(&sessions_dir) else {
+        return;
+    };
+
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if !path.extension().map(|e| e == "json").unwrap_or(false) {
+            continue;
+        }
+        // Don't delete the current session file
+        if let Some(sid) = current_session_id {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                if stem == sid {
+                    continue;
+                }
+            }
+        }
+        if let Ok(content) = fs::read_to_string(&path) {
+            if let Ok(old) = serde_json::from_str::<SessionData>(&content) {
+                if old.current_path == current_path {
+                    let _ = fs::remove_file(&path);
+                }
+            }
+        }
+    }
 }
 
 /// Resolve the channel name and parent category name for a Discord channel.
