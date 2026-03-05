@@ -535,8 +535,12 @@ async fn handle_event(
             let user_name = &new_message.author.name;
             let channel_id = new_message.channel_id;
 
-            // Auth check
-            if !check_auth(user_id, user_name, &data.shared, &data.token).await {
+            // Auth check (allowed bots bypass auth)
+            let is_allowed_bot = new_message.author.bot && {
+                let settings = data.shared.settings.read().await;
+                settings.allowed_bot_ids.contains(&user_id.get())
+            };
+            if !is_allowed_bot && !check_auth(user_id, user_name, &data.shared, &data.token).await {
                 return Ok(());
             }
 
