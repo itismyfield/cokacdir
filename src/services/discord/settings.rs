@@ -13,6 +13,12 @@ use crate::services::provider::ProviderKind;
 use super::formatting::normalize_allowed_tools;
 use super::DiscordBotSettings;
 
+fn json_u64(value: &serde_json::Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_str().and_then(|raw| raw.parse::<u64>().ok()))
+}
+
 /// Compute a short hash key from the bot token (first 16 chars of SHA-256 hex)
 /// Uses "discord_" prefix to namespace Discord bot entries in settings.
 pub(super) fn discord_token_hash(token: &str) -> String {
@@ -177,7 +183,7 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
     let Some(entry) = json.get(&key) else {
         return DiscordBotSettings::default();
     };
-    let owner_user_id = entry.get("owner_user_id").and_then(|v| v.as_u64());
+    let owner_user_id = entry.get("owner_user_id").and_then(json_u64);
     let provider = entry
         .get("provider")
         .and_then(|v| v.as_str())
@@ -204,12 +210,12 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
     let allowed_user_ids = entry
         .get("allowed_user_ids")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+        .map(|arr| arr.iter().filter_map(json_u64).collect())
         .unwrap_or_default();
     let allowed_bot_ids = entry
         .get("allowed_bot_ids")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
+        .map(|arr| arr.iter().filter_map(json_u64).collect())
         .unwrap_or_default();
     let allowed_tools = match entry.get("allowed_tools") {
         None => DEFAULT_ALLOWED_TOOLS
@@ -433,6 +439,34 @@ mod tests {
             assert_eq!(configs.len(), 2);
             assert_eq!(configs[0].provider, ProviderKind::Claude);
             assert_eq!(configs[1].provider, ProviderKind::Codex);
+        });
+    }
+
+    #[test]
+    fn test_load_bot_settings_accepts_string_encoded_ids() {
+        with_temp_home(|temp_home| {
+            let settings_dir = temp_home.path().join(".remotecc");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "owner_user_id": "343742347365974000",
+                    "allowed_user_ids": ["429955158974136300"],
+                    "allowed_bot_ids": ["1479017284805722200"]
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert_eq!(settings.owner_user_id, Some(343742347365974000));
+            assert_eq!(settings.allowed_user_ids, vec![429955158974136300]);
+            assert_eq!(settings.allowed_bot_ids, vec![1479017284805722200]);
         });
     }
 }

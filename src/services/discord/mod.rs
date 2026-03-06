@@ -438,7 +438,8 @@ pub async fn run_bot(token: &str, provider: ProviderKind) {
         })
         .build();
 
-    let intents = serenity::GatewayIntents::GUILD_MESSAGES
+    let intents = serenity::GatewayIntents::GUILDS
+        | serenity::GatewayIntents::GUILD_MESSAGES
         | serenity::GatewayIntents::DIRECT_MESSAGES
         | serenity::GatewayIntents::MESSAGE_CONTENT;
 
@@ -2196,7 +2197,13 @@ async fn handle_text_message(
     if let Some(binding) = role_binding {
         match load_role_prompt(&binding) {
             Some(role_prompt) => {
-                system_prompt_owned.push_str("\n\n[Role Identity]\n");
+                system_prompt_owned.push_str(
+                    "\n\n[Channel Role Binding]\n\
+                     The following role definition is authoritative for this Discord channel.\n\
+                     You MUST answer as this role, stay within its scope, and follow its response contract.\n\
+                     Do NOT override it with a generic assistant persona or by inferring a different role from repository files,\n\
+                     unless the user explicitly asks you to audit or compare role definitions.\n\n",
+                );
                 system_prompt_owned.push_str(&role_prompt);
                 eprintln!(
                     "  [role-map] Applied role '{}' for channel {}",
@@ -3168,7 +3175,23 @@ async fn resolve_channel_category(
     };
     let ch_name = Some(gc.name.clone());
     let cat_name = if let Some(parent_id) = gc.parent_id {
-        if let Ok(parent_ch) = parent_id.to_channel(&ctx.http).await {
+        let cached_cat_name = ctx
+            .cache
+            .channel(parent_id)
+            .map(|parent_ch| parent_ch.name.clone())
+            .or_else(|| {
+                ctx.cache
+                    .guild_channels(gc.guild_id)
+                    .and_then(|guild_channels| {
+                        guild_channels
+                            .get(&parent_id)
+                            .map(|parent_ch| parent_ch.name.clone())
+                    })
+            });
+
+        if let Some(cat_name) = cached_cat_name {
+            Some(cat_name)
+        } else if let Ok(parent_ch) = parent_id.to_channel(&ctx.http).await {
             match parent_ch {
                 serenity::model::channel::Channel::Guild(cat) => Some(cat.name.clone()),
                 _ => {

@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use serde_json::Value;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
@@ -10,6 +11,7 @@ use crate::services::claude::{
 use crate::services::remote::RemoteProfile;
 
 static CODEX_PATH: OnceLock<Option<String>> = OnceLock::new();
+const TMUX_PROMPT_B64_PREFIX: &str = "__REMOTECC_B64__:";
 
 fn resolve_codex_path() -> Option<String> {
     if let Ok(output) = Command::new("which").arg("codex").output() {
@@ -46,8 +48,8 @@ pub fn execute_command_streaming(
     session_id: Option<&str>,
     working_dir: &str,
     sender: Sender<StreamMessage>,
-    _system_prompt: Option<&str>,
-    _allowed_tools: Option<&[String]>,
+    system_prompt: Option<&str>,
+    allowed_tools: Option<&[String]>,
     cancel_token: Option<std::sync::Arc<CancelToken>>,
     remote_profile: Option<&RemoteProfile>,
     tmux_session_name: Option<&str>,
@@ -56,10 +58,12 @@ pub fn execute_command_streaming(
         return Err("Codex remote profiles are not implemented yet.".to_string());
     }
 
+    let prompt = compose_codex_prompt(prompt, system_prompt, allowed_tools);
+
     if let Some(tmux_name) = tmux_session_name {
         if claude::is_tmux_available() {
             return execute_streaming_local_tmux(
-                prompt,
+                &prompt,
                 working_dir,
                 sender,
                 cancel_token,
@@ -68,7 +72,40 @@ pub fn execute_command_streaming(
         }
     }
 
-    execute_streaming_direct(prompt, session_id, working_dir, sender, cancel_token)
+    execute_streaming_direct(&prompt, session_id, working_dir, sender, cancel_token)
+}
+
+fn compose_codex_prompt(
+    prompt: &str,
+    system_prompt: Option<&str>,
+    allowed_tools: Option<&[String]>,
+) -> String {
+    let mut sections = Vec::new();
+
+    if let Some(system_prompt) = system_prompt
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        sections.push(format!(
+            "[Authoritative Instructions]\n{}\n\nThese instructions are authoritative for this turn. \
+Follow them over any generic assistant persona unless the user explicitly asks to inspect or compare them.",
+            system_prompt
+        ));
+    }
+
+    if let Some(allowed_tools) = allowed_tools.filter(|tools| !tools.is_empty()) {
+        sections.push(format!(
+            "[Tool Policy]\nIf tools are needed, stay within this allowlist unless the user explicitly asks to change it: {}",
+            allowed_tools.join(", ")
+        ));
+    }
+
+    if sections.is_empty() {
+        return prompt.to_string();
+    }
+
+    sections.push(format!("[User Request]\n{}", prompt));
+    sections.join("\n\n")
 }
 
 fn execute_streaming_direct(
@@ -292,7 +329,12 @@ fn send_followup_to_tmux(
         .write(true)
         .open(input_fifo_path)
         .map_err(|e| format!("Failed to open input FIFO: {}", e))?;
-    writeln!(fifo, "{}", prompt).map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
+    let encoded = format!(
+        "{}{}",
+        TMUX_PROMPT_B64_PREFIX,
+        BASE64_STANDARD.encode(prompt.as_bytes())
+    );
+    writeln!(fifo, "{}", encoded).map_err(|e| format!("Failed to write to input FIFO: {}", e))?;
     fifo.flush()
         .map_err(|e| format!("Failed to flush input FIFO: {}", e))?;
     drop(fifo);
@@ -454,8 +496,9 @@ fn handle_codex_json_line(
 mod tests {
     use std::sync::mpsc;
 
-    use super::handle_codex_json_line;
+    use super::{compose_codex_prompt, handle_codex_json_line, TMUX_PROMPT_B64_PREFIX};
     use crate::services::claude::StreamMessage;
+    use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 
     #[test]
     fn test_handle_codex_json_line_maps_thread_and_turn_completion() {
@@ -497,5 +540,38 @@ mod tests {
         assert!(matches!(items[1], StreamMessage::Text { .. }));
         assert!(matches!(items[2], StreamMessage::StatusUpdate { .. }));
         assert!(matches!(items[3], StreamMessage::Done { .. }));
+    }
+
+    #[test]
+    fn test_compose_codex_prompt_includes_authoritative_sections() {
+        let prompt = compose_codex_prompt(
+            "role과 mission만 답해줘.",
+            Some("role: PMD\nmission: 백로그 관리"),
+            Some(&["Bash".to_string(), "Read".to_string()]),
+        );
+
+        assert!(prompt.contains("[Authoritative Instructions]"));
+        assert!(prompt.contains("role: PMD"));
+        assert!(prompt.contains("[Tool Policy]"));
+        assert!(prompt.contains("Bash, Read"));
+        assert!(prompt.contains("[User Request]\nrole과 mission만 답해줘."));
+    }
+
+    #[test]
+    fn test_compose_codex_prompt_returns_plain_prompt_without_overrides() {
+        let prompt = compose_codex_prompt("just answer", None, None);
+        assert_eq!(prompt, "just answer");
+    }
+
+    #[test]
+    fn test_tmux_followup_encoding_is_single_line() {
+        let prompt = "line1\nline2\nline3";
+        let encoded = format!(
+            "{}{}",
+            TMUX_PROMPT_B64_PREFIX,
+            BASE64_STANDARD.encode(prompt.as_bytes())
+        );
+
+        assert!(!encoded.contains('\n'));
     }
 }

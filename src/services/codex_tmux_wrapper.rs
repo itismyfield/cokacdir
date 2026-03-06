@@ -1,8 +1,11 @@
+use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 use std::sync::mpsc;
 
 use crate::services::tmux_wrapper::render_for_terminal;
+
+const TMUX_PROMPT_B64_PREFIX: &str = "__REMOTECC_B64__:";
 
 pub fn run(
     output_file: &str,
@@ -87,7 +90,16 @@ pub fn run(
                     continue;
                 }
                 eprintln!("\x1b[90m[external message received]\x1b[0m");
-                let _ = prompt_tx.send(line);
+                match decode_external_prompt(&line) {
+                    Ok(prompt) => {
+                        if !prompt.trim().is_empty() {
+                            let _ = prompt_tx.send(prompt);
+                        }
+                    }
+                    Err(err) => {
+                        eprintln!("\x1b[90m[input decode error: {}]\x1b[0m", err);
+                    }
+                }
             }
         });
     }
@@ -133,6 +145,16 @@ pub fn run(
     cleanup(output_file, input_fifo);
     eprintln!();
     eprintln!("\x1b[90m--- Session ended ---\x1b[0m");
+}
+
+fn decode_external_prompt(line: &str) -> Result<String, String> {
+    if let Some(encoded) = line.strip_prefix(TMUX_PROMPT_B64_PREFIX) {
+        let bytes = BASE64_STANDARD
+            .decode(encoded)
+            .map_err(|e| format!("invalid base64 payload: {}", e))?;
+        return String::from_utf8(bytes).map_err(|e| format!("invalid utf-8 payload: {}", e));
+    }
+    Ok(line.to_string())
 }
 
 fn cleanup(output_file: &str, input_fifo: &str) {
@@ -287,6 +309,22 @@ fn run_turn(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::decode_external_prompt;
+
+    #[test]
+    fn test_decode_external_prompt_keeps_plain_line() {
+        assert_eq!(decode_external_prompt("hello").unwrap(), "hello");
+    }
+
+    #[test]
+    fn test_decode_external_prompt_decodes_base64_payload() {
+        let line = "__REMOTECC_B64__:bGluZTEKbGluZTI=";
+        assert_eq!(decode_external_prompt(line).unwrap(), "line1\nline2");
+    }
 }
 
 fn handle_item_started(output: &mut std::fs::File, item: &serde_json::Value) -> Result<(), String> {
