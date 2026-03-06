@@ -80,6 +80,13 @@ pub(super) struct MeetingStartRequest {
     pub agenda: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ActiveMeetingSlot {
+    Active,
+    Cancelled,
+    MissingOrReplaced,
+}
+
 /// Generate a unique meeting ID (timestamp + random hex)
 fn generate_meeting_id() -> String {
     let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
@@ -110,10 +117,17 @@ fn truncate_for_meeting(text: &str, max_chars: usize) -> String {
     trimmed.chars().take(max_chars).collect::<String>() + "..."
 }
 
-fn parse_primary_provider_arg(raw: Option<&str>, default_provider: ProviderKind) -> Result<ProviderKind, String> {
+fn parse_primary_provider_arg(
+    raw: Option<&str>,
+    default_provider: ProviderKind,
+) -> Result<ProviderKind, String> {
     match raw.map(str::trim).filter(|value| !value.is_empty()) {
-        Some(value) => ProviderKind::from_str(value)
-            .ok_or_else(|| format!("지원하지 않는 provider야: `{}` (`claude` 또는 `codex`만 가능)", value)),
+        Some(value) => ProviderKind::from_str(value).ok_or_else(|| {
+            format!(
+                "지원하지 않는 provider야: `{}` (`claude` 또는 `codex`만 가능)",
+                value
+            )
+        }),
         None => Ok(default_provider),
     }
 }
@@ -161,6 +175,55 @@ pub(super) fn parse_meeting_start_text(
         primary_provider,
         agenda: agenda.trim().to_string(),
     }))
+}
+
+fn meeting_matches(meeting: &Meeting, expected_id: Option<&str>) -> bool {
+    expected_id.map(|id| meeting.id == id).unwrap_or(true)
+}
+
+fn effective_round_count(meeting: &Meeting) -> u32 {
+    let transcript_max_round = meeting
+        .transcript
+        .iter()
+        .map(|u| u.round)
+        .max()
+        .unwrap_or(0);
+    meeting.current_round.max(transcript_max_round)
+}
+
+fn meeting_slot_state(meeting: Option<&Meeting>, expected_id: &str) -> ActiveMeetingSlot {
+    match meeting {
+        Some(m) if m.id == expected_id && m.status != MeetingStatus::Cancelled => {
+            ActiveMeetingSlot::Active
+        }
+        Some(m) if m.id == expected_id => ActiveMeetingSlot::Cancelled,
+        _ => ActiveMeetingSlot::MissingOrReplaced,
+    }
+}
+
+async fn active_meeting_state(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    expected_id: &str,
+) -> ActiveMeetingSlot {
+    let core = shared.core.lock().await;
+    meeting_slot_state(core.active_meetings.get(&channel_id), expected_id)
+}
+
+async fn cleanup_meeting_if_current(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    expected_id: &str,
+) {
+    let mut core = shared.core.lock().await;
+    let should_remove = core
+        .active_meetings
+        .get(&channel_id)
+        .map(|m| m.id == expected_id)
+        .unwrap_or(false);
+    if should_remove {
+        core.active_meetings.remove(&channel_id);
+    }
 }
 
 // ─── Config Parsing ──────────────────────────────────────────────────────────
@@ -232,7 +295,7 @@ pub(super) async fn start_meeting(
     agenda: &str,
     primary_provider: ProviderKind,
     shared: &Arc<SharedData>,
-) -> Result<String, Error> {
+) -> Result<Option<String>, Error> {
     let config = load_meeting_config().ok_or("Meeting config not found in role_map.json")?;
     let reviewer_provider = primary_provider.counterpart();
 
@@ -277,28 +340,23 @@ pub(super) async fn start_meeting(
         .await;
 
     // Select participants via primary provider + reviewer cross-check
-    let participants = match select_participants(&config, agenda, primary_provider, reviewer_provider).await {
-        Ok(p) if !p.is_empty() => p,
-        Ok(_) => {
-            cleanup_meeting(shared, channel_id).await;
-            return Err("참여자를 선정하지 못했어.".into());
-        }
-        Err(e) => {
-            cleanup_meeting(shared, channel_id).await;
-            return Err(format!("참여자 선정 실패: {}", e).into());
-        }
-    };
-
-    // Check if cancelled during participant selection
-    {
-        let core = shared.core.lock().await;
-        if let Some(m) = core.active_meetings.get(&channel_id) {
-            if m.status == MeetingStatus::Cancelled {
-                drop(core);
-                cleanup_meeting(shared, channel_id).await;
-                return Err("회의가 취소됐어.".into());
+    let participants =
+        match select_participants(&config, agenda, primary_provider, reviewer_provider).await {
+            Ok(p) if !p.is_empty() => p,
+            Ok(_) => {
+                cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+                return Err("참여자를 선정하지 못했어.".into());
             }
-        }
+            Err(e) => {
+                cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+                return Err(format!("참여자 선정 실패: {}", e).into());
+            }
+        };
+
+    // Check if cancelled or replaced during participant selection
+    if active_meeting_state(shared, channel_id, &meeting_id).await != ActiveMeetingSlot::Active {
+        cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+        return Ok(None);
     }
 
     // Announce participants
@@ -321,25 +379,22 @@ pub(super) async fn start_meeting(
     // Update meeting state
     {
         let mut core = shared.core.lock().await;
-        if let Some(m) = core.active_meetings.get_mut(&channel_id) {
-            m.participants = participants;
-            m.status = MeetingStatus::InProgress;
+        match core.active_meetings.get_mut(&channel_id) {
+            Some(m) if m.id == meeting_id => {
+                m.participants = participants;
+                m.status = MeetingStatus::InProgress;
+            }
+            _ => return Ok(None),
         }
     }
 
     // Run meeting rounds
     let max_rounds = config.max_rounds;
     for round in 1..=max_rounds {
-        // Check if cancelled
+        if active_meeting_state(shared, channel_id, &meeting_id).await != ActiveMeetingSlot::Active
         {
-            let core = shared.core.lock().await;
-            if let Some(m) = core.active_meetings.get(&channel_id) {
-                if m.status == MeetingStatus::Cancelled {
-                    break;
-                }
-            } else {
-                break;
-            }
+            cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+            return Ok(None);
         }
 
         rate_limit_wait(shared, channel_id).await;
@@ -351,13 +406,23 @@ pub(super) async fn start_meeting(
             )
             .await;
 
-        let consensus = run_meeting_round(http, channel_id, round, shared).await?;
+        let consensus =
+            match run_meeting_round(http, channel_id, &meeting_id, round, shared).await? {
+                Some(consensus) => consensus,
+                None => {
+                    cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+                    return Ok(None);
+                }
+            };
 
         // Update round counter
         {
             let mut core = shared.core.lock().await;
-            if let Some(m) = core.active_meetings.get_mut(&channel_id) {
-                m.current_round = round;
+            match core.active_meetings.get_mut(&channel_id) {
+                Some(m) if m.id == meeting_id => {
+                    m.current_round = round;
+                }
+                _ => return Ok(None),
             }
         }
 
@@ -374,22 +439,21 @@ pub(super) async fn start_meeting(
     }
 
     // Conclude meeting
-    conclude_meeting(http, channel_id, &config, shared).await?;
+    if !conclude_meeting(http, channel_id, &meeting_id, &config, shared).await? {
+        cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+        return Ok(None);
+    }
 
     // Save record
-    save_meeting_record(shared, channel_id).await?;
+    if !save_meeting_record(shared, channel_id, Some(&meeting_id)).await? {
+        cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
+        return Ok(None);
+    }
 
     // Clean up
-    let mid = {
-        let core = shared.core.lock().await;
-        core.active_meetings
-            .get(&channel_id)
-            .map(|m| m.id.clone())
-            .unwrap_or_default()
-    };
-    cleanup_meeting(shared, channel_id).await;
+    cleanup_meeting_if_current(shared, channel_id, &meeting_id).await;
 
-    Ok(mid)
+    Ok(Some(meeting_id))
 }
 
 /// Cancel a running meeting
@@ -410,7 +474,7 @@ pub(super) async fn cancel_meeting(
 
     if had_meeting {
         // Save whatever transcript we have
-        let _ = save_meeting_record(shared, channel_id).await;
+        let _ = save_meeting_record(shared, channel_id, None).await;
         cleanup_meeting(shared, channel_id).await;
         rate_limit_wait(shared, channel_id).await;
         let _ = channel_id
@@ -527,7 +591,8 @@ async fn select_participants(
         agents_desc.join("\n")
     );
 
-    let initial_response = provider_exec::execute_simple(primary_provider, selection_prompt).await?;
+    let initial_response =
+        provider_exec::execute_simple(primary_provider, selection_prompt).await?;
     let initial_selected = parse_json_array_fragment(&initial_response)?;
 
     let review_prompt = format!(
@@ -610,16 +675,20 @@ async fn select_participants(
 async fn run_meeting_round(
     http: &serenity::Http,
     channel_id: ChannelId,
+    meeting_id: &str,
     round: u32,
     shared: &Arc<SharedData>,
-) -> Result<bool, Error> {
+) -> Result<Option<bool>, Error> {
     // Snapshot participants and transcript for this round
     let (participants, agenda, primary_provider, reviewer_provider) = {
         let core = shared.core.lock().await;
-        let m = core
+        let Some(m) = core
             .active_meetings
             .get(&channel_id)
-            .ok_or("Meeting not found")?;
+            .filter(|m| m.id == meeting_id)
+        else {
+            return Ok(None);
+        };
         (
             m.participants.clone(),
             m.agenda.clone(),
@@ -629,25 +698,20 @@ async fn run_meeting_round(
     };
 
     for participant in &participants {
-        // Check cancellation
-        {
-            let core = shared.core.lock().await;
-            if let Some(m) = core.active_meetings.get(&channel_id) {
-                if m.status == MeetingStatus::Cancelled {
-                    return Ok(false);
-                }
-            } else {
-                return Ok(false);
-            }
+        if active_meeting_state(shared, channel_id, meeting_id).await != ActiveMeetingSlot::Active {
+            return Ok(None);
         }
 
         // Get current transcript for context
         let transcript_text = {
             let core = shared.core.lock().await;
-            let m = core
+            let Some(m) = core
                 .active_meetings
                 .get(&channel_id)
-                .ok_or("Meeting not found")?;
+                .filter(|m| m.id == meeting_id)
+            else {
+                return Ok(None);
+            };
             format_transcript(&m.transcript)
         };
 
@@ -663,6 +727,12 @@ async fn run_meeting_round(
         .await
         {
             Ok(response) => {
+                if active_meeting_state(shared, channel_id, meeting_id).await
+                    != ActiveMeetingSlot::Active
+                {
+                    return Ok(None);
+                }
+
                 // Post to Discord
                 let discord_msg = format!(
                     "**[{}]** (R{})\n{}",
@@ -673,13 +743,16 @@ async fn run_meeting_round(
                 // Append to transcript
                 {
                     let mut core = shared.core.lock().await;
-                    if let Some(m) = core.active_meetings.get_mut(&channel_id) {
-                        m.transcript.push(MeetingUtterance {
-                            role_id: participant.role_id.clone(),
-                            display_name: participant.display_name.clone(),
-                            round,
-                            content: response,
-                        });
+                    match core.active_meetings.get_mut(&channel_id) {
+                        Some(m) if m.id == meeting_id => {
+                            m.transcript.push(MeetingUtterance {
+                                role_id: participant.role_id.clone(),
+                                display_name: participant.display_name.clone(),
+                                round,
+                                content: response,
+                            });
+                        }
+                        _ => return Ok(None),
                     }
                 }
             }
@@ -700,14 +773,17 @@ async fn run_meeting_round(
     // Check consensus
     let consensus = {
         let core = shared.core.lock().await;
-        let m = core
+        let Some(m) = core
             .active_meetings
             .get(&channel_id)
-            .ok_or("Meeting not found")?;
+            .filter(|m| m.id == meeting_id)
+        else {
+            return Ok(None);
+        };
         check_consensus(&m.transcript, round, m.participants.len())
     };
 
-    Ok(consensus)
+    Ok(Some(consensus))
 }
 
 /// Execute a single agent turn using primary draft -> reviewer critique -> primary final.
@@ -872,26 +948,33 @@ fn check_consensus(transcript: &[MeetingUtterance], round: u32, participant_coun
 async fn conclude_meeting(
     http: &serenity::Http,
     channel_id: ChannelId,
+    meeting_id: &str,
     config: &MeetingConfig,
     shared: &Arc<SharedData>,
-) -> Result<(), Error> {
+) -> Result<bool, Error> {
     // Update status
     {
         let mut core = shared.core.lock().await;
-        if let Some(m) = core.active_meetings.get_mut(&channel_id) {
-            if m.status == MeetingStatus::Cancelled {
-                return Ok(());
+        match core.active_meetings.get_mut(&channel_id) {
+            Some(m) if m.id == meeting_id => {
+                if m.status == MeetingStatus::Cancelled {
+                    return Ok(false);
+                }
+                m.status = MeetingStatus::Concluding;
             }
-            m.status = MeetingStatus::Concluding;
+            _ => return Ok(false),
         }
     }
 
     let (agenda, transcript_text, participants_list, primary_provider, reviewer_provider) = {
         let core = shared.core.lock().await;
-        let m = core
+        let Some(m) = core
             .active_meetings
             .get(&channel_id)
-            .ok_or("Meeting not found")?;
+            .filter(|m| m.id == meeting_id)
+        else {
+            return Ok(false);
+        };
         let t = format_transcript(&m.transcript);
         let p: Vec<String> = m
             .participants
@@ -968,6 +1051,9 @@ async fn conclude_meeting(
     );
 
     rate_limit_wait(shared, channel_id).await;
+    if active_meeting_state(shared, channel_id, meeting_id).await != ActiveMeetingSlot::Active {
+        return Ok(false);
+    }
     let _ = channel_id
         .send_message(
             http,
@@ -1044,6 +1130,11 @@ async fn conclude_meeting(
             match provider_exec::execute_simple(primary_provider, final_prompt).await {
                 Ok(text) => {
                     let trimmed = text.trim().to_string();
+                    if active_meeting_state(shared, channel_id, meeting_id).await
+                        != ActiveMeetingSlot::Active
+                    {
+                        return Ok(false);
+                    }
                     send_long_message_raw(http, channel_id, &trimmed, shared).await?;
                     Some(trimmed)
                 }
@@ -1074,23 +1165,33 @@ async fn conclude_meeting(
     // Mark completed and save summary
     {
         let mut core = shared.core.lock().await;
-        if let Some(m) = core.active_meetings.get_mut(&channel_id) {
-            m.summary = summary_text;
-            m.status = MeetingStatus::Completed;
+        match core.active_meetings.get_mut(&channel_id) {
+            Some(m) if m.id == meeting_id => {
+                m.summary = summary_text;
+                m.status = MeetingStatus::Completed;
+            }
+            _ => return Ok(false),
         }
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Save meeting record as Obsidian Markdown to CookingHeart/meetings/
-async fn save_meeting_record(shared: &Arc<SharedData>, channel_id: ChannelId) -> Result<(), Error> {
+async fn save_meeting_record(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    expected_id: Option<&str>,
+) -> Result<bool, Error> {
     let (md, meeting_id, pcd_payload) = {
         let core = shared.core.lock().await;
-        let m = core
+        let Some(m) = core
             .active_meetings
             .get(&channel_id)
-            .ok_or("Meeting not found")?;
+            .filter(|m| meeting_matches(m, expected_id))
+        else {
+            return Ok(false);
+        };
 
         let payload = build_pcd_payload(m);
         (build_meeting_markdown(m), m.id.clone(), payload)
@@ -1114,7 +1215,7 @@ async fn save_meeting_record(shared: &Arc<SharedData>, channel_id: ChannelId) ->
         });
     }
 
-    Ok(())
+    Ok(true)
 }
 
 /// Build PCD API payload from meeting
@@ -1124,6 +1225,7 @@ fn build_pcd_payload(m: &Meeting) -> Option<serde_json::Value> {
         MeetingStatus::Cancelled => "cancelled",
         _ => "in_progress",
     };
+    let total_rounds = effective_round_count(m);
 
     let participant_names: Vec<&str> = m
         .participants
@@ -1159,7 +1261,7 @@ fn build_pcd_payload(m: &Meeting) -> Option<serde_json::Value> {
         "primary_provider": m.primary_provider.as_str(),
         "reviewer_provider": m.reviewer_provider.as_str(),
         "participant_names": participant_names,
-        "total_rounds": m.current_round,
+        "total_rounds": total_rounds,
         "started_at": started_at,
         "completed_at": if m.status == MeetingStatus::Completed { serde_json::Value::from(chrono::Local::now().timestamp_millis()) } else { serde_json::Value::Null },
         "entries": entries,
@@ -1186,6 +1288,7 @@ fn build_meeting_markdown(m: &Meeting) -> String {
     let now = chrono::Local::now();
     let date_str = now.format("%Y-%m-%d").to_string();
     let datetime_str = now.format("%Y-%m-%d %H:%M").to_string();
+    let total_rounds = effective_round_count(m);
 
     let status_str = match &m.status {
         MeetingStatus::SelectingParticipants | MeetingStatus::InProgress => "진행중",
@@ -1227,7 +1330,7 @@ fn build_meeting_markdown(m: &Meeting) -> String {
         primary_provider = m.primary_provider.as_str(),
         reviewer_provider = m.reviewer_provider.as_str(),
         datetime = datetime_str,
-        rounds = m.current_round,
+        rounds = total_rounds,
         max_rounds = m.max_rounds,
         summary = summary_section,
         transcript = transcript_sections.join("\n"),
@@ -1284,7 +1387,8 @@ pub(super) async fn handle_meeting_command(
             let _ = channel_id
                 .send_message(
                     &*http,
-                    CreateMessage::new().content("사용법: `/meeting start [--primary claude|codex] <안건>`"),
+                    CreateMessage::new()
+                        .content("사용법: `/meeting start [--primary claude|codex] <안건>`"),
                 )
                 .await;
             return Ok(true);
@@ -1297,11 +1401,20 @@ pub(super) async fn handle_meeting_command(
 
         // Spawn meeting as a background task so it doesn't block message handling
         tokio::spawn(async move {
-            match start_meeting(&*http_clone, channel_id, &agenda, primary_provider, &shared_clone).await {
-                Ok(id) => {
+            match start_meeting(
+                &*http_clone,
+                channel_id,
+                &agenda,
+                primary_provider,
+                &shared_clone,
+            )
+            .await
+            {
+                Ok(Some(id)) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ✅ Meeting completed: {id}");
                 }
+                Ok(None) => {}
                 Err(e) => {
                     let ts = chrono::Local::now().format("%H:%M:%S");
                     println!("  [{ts}] ❌ Meeting error: {e}");
@@ -1336,7 +1449,12 @@ pub(super) async fn handle_meeting_command(
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_meeting_start_text, ProviderKind};
+    use super::{
+        build_pcd_payload, effective_round_count, meeting_slot_state, parse_meeting_start_text,
+        ActiveMeetingSlot, Meeting, MeetingStatus, MeetingUtterance, ProviderKind,
+    };
+    use poise::serenity_prelude::ChannelId;
+    use serde_json::json;
 
     #[test]
     fn test_parse_meeting_start_text_defaults_to_current_provider() {
@@ -1349,11 +1467,86 @@ mod tests {
 
     #[test]
     fn test_parse_meeting_start_text_accepts_primary_flag() {
-        let parsed =
-            parse_meeting_start_text("/meeting start --primary codex 신규 안건", ProviderKind::Claude)
-                .unwrap()
-                .unwrap();
+        let parsed = parse_meeting_start_text(
+            "/meeting start --primary codex 신규 안건",
+            ProviderKind::Claude,
+        )
+        .unwrap()
+        .unwrap();
         assert_eq!(parsed.primary_provider, ProviderKind::Codex);
         assert_eq!(parsed.agenda, "신규 안건");
+    }
+
+    fn fixture_meeting(id: &str, status: MeetingStatus) -> Meeting {
+        Meeting {
+            id: id.to_string(),
+            channel_id: ChannelId::new(1),
+            agenda: "test".to_string(),
+            primary_provider: ProviderKind::Claude,
+            reviewer_provider: ProviderKind::Codex,
+            participants: Vec::new(),
+            transcript: Vec::new(),
+            current_round: 0,
+            max_rounds: 3,
+            status,
+            summary: None,
+            started_at: "2026-03-06T00:00:00+09:00".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_meeting_slot_state_matches_current_meeting() {
+        let meeting = fixture_meeting("mtg-a", MeetingStatus::InProgress);
+        assert_eq!(
+            meeting_slot_state(Some(&meeting), "mtg-a"),
+            ActiveMeetingSlot::Active
+        );
+    }
+
+    #[test]
+    fn test_meeting_slot_state_detects_cancelled_current_meeting() {
+        let meeting = fixture_meeting("mtg-a", MeetingStatus::Cancelled);
+        assert_eq!(
+            meeting_slot_state(Some(&meeting), "mtg-a"),
+            ActiveMeetingSlot::Cancelled
+        );
+    }
+
+    #[test]
+    fn test_meeting_slot_state_detects_replaced_meeting() {
+        let meeting = fixture_meeting("mtg-b", MeetingStatus::InProgress);
+        assert_eq!(
+            meeting_slot_state(Some(&meeting), "mtg-a"),
+            ActiveMeetingSlot::MissingOrReplaced
+        );
+    }
+
+    #[test]
+    fn test_effective_round_count_uses_transcript_round_when_current_round_lags() {
+        let mut meeting = fixture_meeting("mtg-a", MeetingStatus::Cancelled);
+        meeting.current_round = 0;
+        meeting.transcript.push(MeetingUtterance {
+            role_id: "ch-td".to_string(),
+            display_name: "TD".to_string(),
+            round: 1,
+            content: "late round one".to_string(),
+        });
+
+        assert_eq!(effective_round_count(&meeting), 1);
+    }
+
+    #[test]
+    fn test_build_pcd_payload_uses_effective_round_count() {
+        let mut meeting = fixture_meeting("mtg-a", MeetingStatus::Cancelled);
+        meeting.current_round = 0;
+        meeting.transcript.push(MeetingUtterance {
+            role_id: "ch-td".to_string(),
+            display_name: "TD".to_string(),
+            round: 1,
+            content: "late round one".to_string(),
+        });
+
+        let payload = build_pcd_payload(&meeting).expect("payload");
+        assert_eq!(payload.get("total_rounds"), Some(&json!(1)));
     }
 }

@@ -1971,8 +1971,10 @@ async fn cmd_meeting(
         "start" => {
             let agenda_text = agenda_str.trim();
             if agenda_text.is_empty() {
-                ctx.say("사용법: `/meeting start <안건>` + optional `primary_provider=claude|codex`")
-                    .await?;
+                ctx.say(
+                    "사용법: `/meeting start <안건>` + optional `primary_provider=claude|codex`",
+                )
+                .await?;
                 return Ok(());
             }
             let selected_provider = match primary_provider.as_deref().map(ProviderKind::from_str) {
@@ -1996,10 +1998,11 @@ async fn cmd_meeting(
                 )
                 .await
                 {
-                    Ok(id) => {
+                    Ok(Some(id)) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         println!("  [{ts}] ✅ Meeting completed: {id}");
                     }
+                    Ok(None) => {}
                     Err(e) => {
                         let ts = chrono::Local::now().format("%H:%M:%S");
                         println!("  [{ts}] ❌ Meeting error: {e}");
