@@ -2,13 +2,14 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
-use sha2::{Digest, Sha256};
 use serenity::ChannelId;
+use sha2::{Digest, Sha256};
 
 use poise::serenity_prelude as serenity;
 
 use crate::services::claude::DEFAULT_ALLOWED_TOOLS;
 
+use super::formatting::normalize_allowed_tools;
 use super::DiscordBotSettings;
 
 /// Compute a short hash key from the bot token (first 16 chars of SHA-256 hex)
@@ -46,7 +47,10 @@ pub(super) fn parse_role_binding(v: &serde_json::Value) -> Option<RoleBinding> {
     })
 }
 
-pub(super) fn resolve_role_binding(channel_id: ChannelId, channel_name: Option<&str>) -> Option<RoleBinding> {
+pub(super) fn resolve_role_binding(
+    channel_id: ChannelId,
+    channel_name: Option<&str>,
+) -> Option<RoleBinding> {
     let path = role_map_path()?;
     let content = fs::read_to_string(path).ok()?;
     let json: serde_json::Value = serde_json::from_str(&content).ok()?;
@@ -166,22 +170,6 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         return DiscordBotSettings::default();
     };
     let owner_user_id = entry.get("owner_user_id").and_then(|v| v.as_u64());
-    let Some(tools_arr) = entry.get("allowed_tools").and_then(|v| v.as_array()) else {
-        return DiscordBotSettings {
-            owner_user_id,
-            ..DiscordBotSettings::default()
-        };
-    };
-    let tools: Vec<String> = tools_arr
-        .iter()
-        .filter_map(|v| v.as_str().map(String::from))
-        .collect();
-    if tools.is_empty() {
-        return DiscordBotSettings {
-            owner_user_id,
-            ..DiscordBotSettings::default()
-        };
-    }
     let last_sessions = entry
         .get("last_sessions")
         .and_then(|v| v.as_object())
@@ -210,8 +198,27 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         .and_then(|v| v.as_array())
         .map(|arr| arr.iter().filter_map(|v| v.as_u64()).collect())
         .unwrap_or_default();
+    let allowed_tools = match entry.get("allowed_tools") {
+        None => DEFAULT_ALLOWED_TOOLS
+            .iter()
+            .map(|tool| (*tool).to_string())
+            .collect(),
+        Some(value) => {
+            let Some(tools_arr) = value.as_array() else {
+                return DiscordBotSettings {
+                    owner_user_id,
+                    last_sessions,
+                    last_remotes,
+                    allowed_user_ids,
+                    allowed_bot_ids,
+                    ..DiscordBotSettings::default()
+                };
+            };
+            normalize_allowed_tools(tools_arr.iter().filter_map(|v| v.as_str()))
+        }
+    };
     DiscordBotSettings {
-        allowed_tools: tools,
+        allowed_tools,
         last_sessions,
         last_remotes,
         owner_user_id,
@@ -234,9 +241,10 @@ pub(super) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
         serde_json::json!({})
     };
     let key = discord_token_hash(token);
+    let normalized_tools = normalize_allowed_tools(&settings.allowed_tools);
     let mut entry = serde_json::json!({
         "token": token,
-        "allowed_tools": settings.allowed_tools,
+        "allowed_tools": normalized_tools,
         "last_sessions": settings.last_sessions,
         "last_remotes": settings.last_remotes,
         "allowed_user_ids": settings.allowed_user_ids,
@@ -262,4 +270,91 @@ pub fn resolve_discord_token_by_hash(hash: &str) -> Option<String> {
         .get("token")
         .and_then(|v| v.as_str())
         .map(String::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::sync::{Mutex, OnceLock};
+
+    use tempfile::TempDir;
+
+    use super::{discord_token_hash, load_bot_settings};
+
+    fn env_lock() -> &'static Mutex<()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+    }
+
+    fn with_temp_home<F>(f: F)
+    where
+        F: FnOnce(&TempDir),
+    {
+        let _guard = env_lock().lock().unwrap();
+        let temp_home = TempDir::new().unwrap();
+        let previous_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", temp_home.path());
+        f(&temp_home);
+        match previous_home {
+            Some(home) => std::env::set_var("HOME", home),
+            None => std::env::remove_var("HOME"),
+        }
+    }
+
+    #[test]
+    fn test_load_bot_settings_keeps_explicit_empty_allowed_tools() {
+        with_temp_home(|temp_home| {
+            let settings_dir = temp_home.path().join(".remotecc");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "allowed_tools": [],
+                    "owner_user_id": 42,
+                    "allowed_user_ids": [7],
+                    "allowed_bot_ids": [9]
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert!(settings.allowed_tools.is_empty());
+            assert_eq!(settings.owner_user_id, Some(42));
+            assert_eq!(settings.allowed_user_ids, vec![7]);
+            assert_eq!(settings.allowed_bot_ids, vec![9]);
+        });
+    }
+
+    #[test]
+    fn test_load_bot_settings_normalizes_and_dedupes_tool_names() {
+        with_temp_home(|temp_home| {
+            let settings_dir = temp_home.path().join(".remotecc");
+            fs::create_dir_all(&settings_dir).unwrap();
+            let token = "test-token";
+            let key = discord_token_hash(token);
+            let json = serde_json::json!({
+                key: {
+                    "token": token,
+                    "allowed_tools": ["webfetch", "WebFetch", "BASH", "unknown-tool"]
+                }
+            });
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&json).unwrap(),
+            )
+            .unwrap();
+
+            let settings = load_bot_settings(token);
+            assert_eq!(
+                settings.allowed_tools,
+                vec!["WebFetch".to_string(), "Bash".to_string()]
+            );
+        });
+    }
 }

@@ -13,6 +13,8 @@ use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::utils::format::safe_prefix;
+
 /// Entry point for the tmux wrapper subprocess.
 pub fn run(
     output_file: &str,
@@ -296,10 +298,10 @@ fn format_tool_detail(name: &str, item: &serde_json::Value) -> String {
             let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
             let desc = input.get("description").and_then(|v| v.as_str()).unwrap_or("");
             if !desc.is_empty() {
-                let truncated = if cmd.len() > 120 { &cmd[..120] } else { cmd };
+                let truncated = safe_prefix(cmd, 120);
                 format!("{}: `{}`", desc, truncated)
             } else if !cmd.is_empty() {
-                let truncated = if cmd.len() > 150 { &cmd[..150] } else { cmd };
+                let truncated = safe_prefix(cmd, 150);
                 format!("`{}`", truncated)
             } else {
                 String::new()
@@ -428,5 +430,43 @@ fn render_for_terminal(json_line: &str) {
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_tool_detail;
+    use crate::utils::format::safe_prefix;
+    use serde_json::json;
+
+    #[test]
+    fn format_tool_detail_truncates_bash_with_description_on_char_boundary() {
+        let cmd = format!("echo {}", "한".repeat(50));
+        let item = json!({
+            "input": {
+                "command": cmd,
+                "description": "한글 설명"
+            }
+        });
+
+        let detail = format_tool_detail("Bash", &item);
+        let expected = safe_prefix(item["input"]["command"].as_str().unwrap(), 120);
+
+        assert_eq!(detail, format!("한글 설명: `{}`", expected));
+    }
+
+    #[test]
+    fn format_tool_detail_truncates_bash_without_description_on_char_boundary() {
+        let cmd = format!("printf {}", "한".repeat(80));
+        let item = json!({
+            "input": {
+                "command": cmd
+            }
+        });
+
+        let detail = format_tool_detail("Bash", &item);
+        let expected = safe_prefix(item["input"]["command"].as_str().unwrap(), 150);
+
+        assert_eq!(detail, format!("`{}`", expected));
     }
 }

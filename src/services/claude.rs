@@ -7,6 +7,7 @@ use std::sync::mpsc::Sender;
 use std::sync::OnceLock;
 
 use crate::services::remote::RemoteProfile;
+use crate::utils::format::safe_prefix;
 
 /// Cached path to the claude binary.
 /// Once resolved, reused for all subsequent calls.
@@ -1238,7 +1239,7 @@ fn execute_streaming_remote(
             escaped_args.join(" ")
         );
 
-        debug_log(&format!("Remote command: {}", &cmd[..cmd.len().min(300)]));
+        debug_log(&format!("Remote command: {}", safe_prefix(&cmd, 300)));
 
         channel.exec(true, cmd)
             .await
@@ -1503,7 +1504,7 @@ pub fn sanitize_tmux_session_name(channel_name: &str) -> String {
             }
         })
         .collect();
-    let trimmed = &sanitized[..sanitized.len().min(50)];
+    let trimmed = safe_prefix(&sanitized, 50);
     format!("remoteCC-{}", trimmed)
 }
 
@@ -1607,7 +1608,7 @@ fn execute_streaming_local_tmux(
 
     debug_log(&format!(
         "Wrapper cmd: {}",
-        &wrapper_cmd[..wrapper_cmd.len().min(300)]
+        safe_prefix(&wrapper_cmd, 300)
     ));
 
     // Launch tmux session (remove CLAUDECODE so nested claude invocations work)
@@ -2226,7 +2227,7 @@ fn execute_streaming_remote_tmux(
         eprintln!("  [remote-tmux] Stream ended. exit_status={:?}, stderr_len={}, tokens_in={}, has_result={}",
             exit_status, stderr_msg.len(), line_state.accum_input_tokens, line_state.final_result.is_some());
         if !stderr_msg.is_empty() {
-            eprintln!("  [remote-tmux] stderr: {}", &stderr_msg[..stderr_msg.len().min(500)]);
+            eprintln!("  [remote-tmux] stderr: {}", safe_prefix(&stderr_msg, 500));
         }
         let success = exit_status.map_or(true, |s| s == 0);
         if line_state.stdout_error.is_some() || (!success && line_state.final_result.is_none()) {
