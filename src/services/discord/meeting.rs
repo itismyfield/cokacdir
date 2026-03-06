@@ -789,13 +789,15 @@ async fn save_meeting_record(
     shared: &Arc<SharedData>,
     channel_id: ChannelId,
 ) -> Result<(), Error> {
-    let (md, meeting_id) = {
+    let (md, meeting_id, pcd_payload) = {
         let core = shared.core.lock().await;
         let m = core
             .active_meetings
             .get(&channel_id)
             .ok_or("Meeting not found")?;
-        (build_meeting_markdown(m), m.id.clone())
+
+        let payload = build_pcd_payload(m);
+        (build_meeting_markdown(m), m.id.clone(), payload)
     };
 
     let meetings_dir = dirs::home_dir()
@@ -809,6 +811,69 @@ async fn save_meeting_record(
     let path = meetings_dir.join(format!("{}_{}.md", date_str, meeting_id));
     fs::write(&path, md)?;
 
+    // POST meeting data to PCD (fire-and-forget, ignore errors)
+    if let Some(payload) = pcd_payload {
+        tokio::spawn(async move {
+            let _ = post_meeting_to_pcd(payload).await;
+        });
+    }
+
+    Ok(())
+}
+
+/// Build PCD API payload from meeting
+fn build_pcd_payload(m: &Meeting) -> Option<serde_json::Value> {
+    let status_str = match &m.status {
+        MeetingStatus::Completed => "completed",
+        MeetingStatus::Cancelled => "cancelled",
+        _ => "in_progress",
+    };
+
+    let participant_names: Vec<&str> = m.participants.iter().map(|p| p.display_name.as_str()).collect();
+
+    let entries: Vec<serde_json::Value> = m
+        .transcript
+        .iter()
+        .enumerate()
+        .map(|(i, u)| {
+            serde_json::json!({
+                "seq": i + 1,
+                "round": u.round,
+                "speaker_role_id": u.role_id,
+                "speaker_name": u.display_name,
+                "content": u.content,
+                "is_summary": false,
+            })
+        })
+        .collect();
+
+    let started_at = chrono::DateTime::parse_from_rfc3339(&m.started_at)
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or_else(|_| chrono::Local::now().timestamp_millis());
+
+    Some(serde_json::json!({
+        "id": m.id,
+        "agenda": m.agenda,
+        "summary": m.summary,
+        "status": status_str,
+        "participant_names": participant_names,
+        "total_rounds": m.current_round,
+        "started_at": started_at,
+        "completed_at": if m.status == MeetingStatus::Completed { serde_json::Value::from(chrono::Local::now().timestamp_millis()) } else { serde_json::Value::Null },
+        "entries": entries,
+    }))
+}
+
+/// POST meeting data to PCD server
+async fn post_meeting_to_pcd(payload: serde_json::Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(10))
+        .build()?;
+    let _ = client
+        .post("http://localhost:8791/api/round-table-meetings")
+        .json(&payload)
+        .send()
+        .await?;
     Ok(())
 }
 
