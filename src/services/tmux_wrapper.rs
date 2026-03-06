@@ -58,7 +58,9 @@ pub fn run(
             working_dir.to_string()
         }
     } else if working_dir == "~" {
-        dirs::home_dir().map(|h| h.to_string_lossy().to_string()).unwrap_or_else(|| working_dir.to_string())
+        dirs::home_dir()
+            .map(|h| h.to_string_lossy().to_string())
+            .unwrap_or_else(|| working_dir.to_string())
     } else {
         working_dir.to_string()
     };
@@ -163,8 +165,14 @@ pub fn run(
                     // Detect fatal startup errors (e.g. auth failure).
                     // If Claude reports is_error with zero cost, it failed before
                     // making any API call — no point keeping the session alive.
-                    let is_error = json.get("is_error").and_then(|v| v.as_bool()).unwrap_or(false);
-                    let cost = json.get("total_cost_usd").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                    let is_error = json
+                        .get("is_error")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                    let cost = json
+                        .get("total_cost_usd")
+                        .and_then(|v| v.as_f64())
+                        .unwrap_or(1.0);
                     if is_error && cost == 0.0 {
                         eprintln!("\x1b[31m[fatal startup error — session will exit]\x1b[0m");
                         break;
@@ -296,7 +304,10 @@ fn format_tool_detail(name: &str, item: &serde_json::Value) -> String {
     match name {
         "Bash" => {
             let cmd = input.get("command").and_then(|v| v.as_str()).unwrap_or("");
-            let desc = input.get("description").and_then(|v| v.as_str()).unwrap_or("");
+            let desc = input
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
             if !desc.is_empty() {
                 let truncated = safe_prefix(cmd, 120);
                 format!("{}: `{}`", desc, truncated)
@@ -307,37 +318,86 @@ fn format_tool_detail(name: &str, item: &serde_json::Value) -> String {
                 String::new()
             }
         }
-        "Read" => input.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "Read" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         "Write" => {
-            let fp = input.get("file_path").and_then(|v| v.as_str()).unwrap_or("");
-            let lines = input.get("content").and_then(|v| v.as_str()).map(|c| c.lines().count()).unwrap_or(0);
-            if lines > 0 { format!("{} ({} lines)", fp, lines) } else { fp.to_string() }
+            let fp = input
+                .get("file_path")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let lines = input
+                .get("content")
+                .and_then(|v| v.as_str())
+                .map(|c| c.lines().count())
+                .unwrap_or(0);
+            if lines > 0 {
+                format!("{} ({} lines)", fp, lines)
+            } else {
+                fp.to_string()
+            }
         }
-        "Edit" => input.get("file_path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "Edit" => input
+            .get("file_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         "Glob" => {
             let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            if !path.is_empty() { format!("{} in {}", pattern, path) } else { pattern.to_string() }
+            if !path.is_empty() {
+                format!("{} in {}", pattern, path)
+            } else {
+                pattern.to_string()
+            }
         }
         "Grep" => {
             let pattern = input.get("pattern").and_then(|v| v.as_str()).unwrap_or("");
             let path = input.get("path").and_then(|v| v.as_str()).unwrap_or("");
-            if !path.is_empty() { format!("\"{}\" in {}", pattern, path) } else { format!("\"{}\"", pattern) }
+            if !path.is_empty() {
+                format!("\"{}\" in {}", pattern, path)
+            } else {
+                format!("\"{}\"", pattern)
+            }
         }
-        "WebSearch" => input.get("query").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        "WebFetch" => input.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "WebSearch" => input
+            .get("query")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
+        "WebFetch" => input
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         "Agent" => {
-            let desc = input.get("description").and_then(|v| v.as_str()).unwrap_or("");
-            let agent_type = input.get("subagent_type").and_then(|v| v.as_str()).unwrap_or("");
-            if !agent_type.is_empty() { format!("[{}] {}", agent_type, desc) } else { desc.to_string() }
+            let desc = input
+                .get("description")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let agent_type = input
+                .get("subagent_type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !agent_type.is_empty() {
+                format!("[{}] {}", agent_type, desc)
+            } else {
+                desc.to_string()
+            }
         }
-        "Skill" => input.get("skill").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+        "Skill" => input
+            .get("skill")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string(),
         _ => String::new(),
     }
 }
 
 /// Render a stream-json line as human-readable terminal output.
-fn render_for_terminal(json_line: &str) {
+pub(crate) fn render_for_terminal(json_line: &str) {
     let json: serde_json::Value = match serde_json::from_str(json_line) {
         Ok(v) => v,
         Err(_) => return,

@@ -70,6 +70,7 @@ if [[ "$deploy_live" -eq 1 ]]; then
   need_cmd tmux
   need_cmd ps
   need_cmd awk
+  need_cmd codesign
 fi
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -106,7 +107,11 @@ fi
 echo "[4/4] Deploy live binary"
 backup_path="$prod_bin.$(date +%Y%m%d-%H%M%S).bak"
 cp "$prod_bin" "$backup_path"
-install -m 755 "$release_bin" "$prod_bin"
+tmp_deploy="$prod_bin.new.$$"
+rm -f "$tmp_deploy"
+install -m 755 "$release_bin" "$tmp_deploy"
+codesign --force --sign - "$tmp_deploy" >/dev/null
+mv -f "$tmp_deploy" "$prod_bin"
 
 prod_sha="$(shasum -a 256 "$prod_bin" | awk '{print $1}')"
 echo "prod_sha256=$prod_sha"

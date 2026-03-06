@@ -17,6 +17,8 @@ use poise::serenity_prelude as serenity;
 use serenity::{ChannelId, CreateAttachment, CreateMessage, EditMessage, MessageId, UserId};
 
 use crate::services::claude::{self, CancelToken, StreamMessage, DEFAULT_ALLOWED_TOOLS};
+use crate::services::codex;
+use crate::services::provider::ProviderKind;
 use crate::ui::ai_screen::{self, HistoryItem, HistoryType, SessionData};
 
 use formatting::{
@@ -30,7 +32,9 @@ use settings::{
 };
 use tmux::{cleanup_orphan_tmux_sessions, restore_tmux_watchers, tmux_output_watcher};
 
-pub use settings::resolve_discord_token_by_hash;
+pub use settings::{
+    load_discord_bot_launch_configs, resolve_discord_bot_provider, resolve_discord_token_by_hash,
+};
 
 /// Discord message length limit
 pub(super) const DISCORD_MSG_LIMIT: usize = 2000;
@@ -78,6 +82,7 @@ struct Intervention {
 /// Bot-level settings persisted to disk
 #[derive(Clone)]
 pub(super) struct DiscordBotSettings {
+    pub(super) provider: ProviderKind,
     pub(super) allowed_tools: Vec<String>,
     /// channel_id (string) → last working directory path
     pub(super) last_sessions: std::collections::HashMap<String, String>,
@@ -94,6 +99,7 @@ pub(super) struct DiscordBotSettings {
 impl Default for DiscordBotSettings {
     fn default() -> Self {
         Self {
+            provider: ProviderKind::Claude,
             allowed_tools: DEFAULT_ALLOWED_TOOLS
                 .iter()
                 .map(|s| s.to_string())
@@ -150,6 +156,7 @@ pub(super) struct SharedData {
 struct Data {
     shared: Arc<SharedData>,
     token: String,
+    provider: ProviderKind,
 }
 
 type Error = Box<dyn std::error::Error + Send + Sync>;
@@ -190,49 +197,111 @@ fn enqueue_intervention(queue: &mut Vec<Intervention>, intervention: Interventio
     true
 }
 
-/// Scan for available Claude Code skills (slash commands).
-/// Searches: ~/.claude/commands/ and <project>/.claude/commands/
-/// Also includes Claude Code built-in commands.
-fn scan_skills(project_path: Option<&str>) -> Vec<(String, String)> {
+/// Scan for provider-specific skills available to this bot.
+fn scan_skills(provider: ProviderKind, project_path: Option<&str>) -> Vec<(String, String)> {
     let mut skills: Vec<(String, String)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
 
-    // Add built-in commands first
-    for (name, desc) in BUILTIN_SKILLS {
-        seen.insert(name.to_string());
-        skills.push((name.to_string(), desc.to_string()));
-    }
+    match provider {
+        ProviderKind::Claude => {
+            for (name, desc) in BUILTIN_SKILLS {
+                seen.insert(name.to_string());
+                skills.push((name.to_string(), desc.to_string()));
+            }
 
-    let mut dirs_to_scan: Vec<std::path::PathBuf> = Vec::new();
+            let mut dirs_to_scan: Vec<std::path::PathBuf> = Vec::new();
+            if let Some(home) = dirs::home_dir() {
+                dirs_to_scan.push(home.join(".claude").join("commands"));
+            }
+            if let Some(proj) = project_path {
+                dirs_to_scan.push(Path::new(proj).join(".claude").join("commands"));
+            }
 
-    // Global skills: ~/.claude/commands/
-    if let Some(home) = dirs::home_dir() {
-        dirs_to_scan.push(home.join(".claude").join("commands"));
-    }
-
-    // Project-level skills: <project>/.claude/commands/
-    if let Some(proj) = project_path {
-        dirs_to_scan.push(Path::new(proj).join(".claude").join("commands"));
-    }
-
-    for dir in dirs_to_scan {
-        if !dir.is_dir() {
-            continue;
+            for dir in dirs_to_scan {
+                if !dir.is_dir() {
+                    continue;
+                }
+                let Ok(entries) = fs::read_dir(&dir) else {
+                    continue;
+                };
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if path.extension().map(|e| e == "md").unwrap_or(false) {
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            let name = stem.to_string();
+                            if seen.insert(name.clone()) {
+                                let desc = fs::read_to_string(&path)
+                                    .ok()
+                                    .map(|content| extract_skill_description(&content))
+                                    .unwrap_or_else(|| format!("Skill: {}", name));
+                                skills.push((name, desc));
+                            }
+                        }
+                    }
+                }
+            }
         }
-        let Ok(entries) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            if path.extension().map(|e| e == "md").unwrap_or(false) {
-                if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                    let name = stem.to_string();
-                    if seen.insert(name.clone()) {
-                        let desc = fs::read_to_string(&path)
-                            .ok()
-                            .map(|content| extract_skill_description(&content))
-                            .unwrap_or_else(|| format!("Skill: {}", name));
-                        skills.push((name, desc));
+        ProviderKind::Codex => {
+            let mut roots = Vec::new();
+            if let Some(home) = dirs::home_dir() {
+                roots.push(home.join(".codex").join("skills"));
+            }
+            if let Some(proj) = project_path {
+                roots.push(Path::new(proj).join(".codex").join("skills"));
+            }
+
+            for root in roots {
+                if !root.is_dir() {
+                    continue;
+                }
+                let Ok(entries) = fs::read_dir(&root) else {
+                    continue;
+                };
+                for entry in entries.filter_map(|e| e.ok()) {
+                    let path = entry.path();
+                    if let Some(skill_path) = resolve_codex_skill_file(&path) {
+                        if let Some(name) = skill_path
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|s| s.to_str())
+                        {
+                            let name = name.to_string();
+                            if seen.insert(name.clone()) {
+                                let desc = fs::read_to_string(&skill_path)
+                                    .ok()
+                                    .map(|content| extract_skill_description(&content))
+                                    .unwrap_or_else(|| format!("Skill: {}", name));
+                                skills.push((name, desc));
+                            }
+                        }
+                        continue;
+                    }
+
+                    if path.is_dir() {
+                        let Ok(nested) = fs::read_dir(&path) else {
+                            continue;
+                        };
+                        for child in nested.filter_map(|e| e.ok()) {
+                            let child_path = child.path();
+                            let Some(skill_path) = resolve_codex_skill_file(&child_path) else {
+                                continue;
+                            };
+                            let Some(name) = skill_path
+                                .parent()
+                                .and_then(|p| p.file_name())
+                                .and_then(|s| s.to_str())
+                            else {
+                                continue;
+                            };
+                            let name = name.to_string();
+                            if seen.insert(name.clone()) {
+                                let desc = fs::read_to_string(&skill_path)
+                                    .ok()
+                                    .map(|content| extract_skill_description(&content))
+                                    .unwrap_or_else(|| format!("Skill: {}", name));
+                                skills.push((name, desc));
+                            }
+                        }
                     }
                 }
             }
@@ -243,21 +312,36 @@ fn scan_skills(project_path: Option<&str>) -> Vec<(String, String)> {
     skills
 }
 
+fn resolve_codex_skill_file(path: &Path) -> Option<std::path::PathBuf> {
+    if path.is_dir() {
+        let skill_path = path.join("SKILL.md");
+        if skill_path.is_file() {
+            return Some(skill_path);
+        }
+    }
+    None
+}
+
 /// Entry point: start the Discord bot
-pub async fn run_bot(token: &str) {
+pub async fn run_bot(token: &str, provider: ProviderKind) {
     // Initialize debug logging from environment variable
     claude::init_debug_from_env();
 
-    let bot_settings = load_bot_settings(token);
+    let mut bot_settings = load_bot_settings(token);
+    bot_settings.provider = provider;
 
     match bot_settings.owner_user_id {
         Some(owner_id) => println!("  ✓ Owner: {owner_id}"),
         None => println!("  ⚠ No owner registered — first user will be registered as owner"),
     }
 
-    let initial_skills = scan_skills(None);
+    let initial_skills = scan_skills(provider, None);
     let skill_count = initial_skills.len();
-    println!("  ✓ Skills loaded: {skill_count}");
+    println!(
+        "  ✓ {} bot ready — Skills loaded: {}",
+        provider.display_name(),
+        skill_count
+    );
 
     // Cleanup stale Discord uploads on process start
     cleanup_old_uploads(UPLOAD_MAX_AGE);
@@ -348,6 +432,7 @@ pub async fn run_bot(token: &str) {
                 Ok(Data {
                     shared: shared_clone,
                     token: token_owned,
+                    provider,
                 })
             })
         })
@@ -363,7 +448,7 @@ pub async fn run_bot(token: &str) {
         .expect("Failed to create Discord client");
 
     if let Err(e) = client.start().await {
-        eprintln!("  ✗ Discord bot error: {e}");
+        eprintln!("  ✗ {} bot error: {e}", provider.display_name());
     }
 }
 
@@ -441,6 +526,57 @@ async fn add_reaction(
     let reaction = serenity::ReactionType::Unicode(emoji.to_string());
     let _ = channel_id
         .create_reaction(&ctx.http, message_id, reaction)
+        .await;
+}
+
+async fn build_pcd_session_key(
+    shared: &Arc<SharedData>,
+    channel_id: ChannelId,
+    provider: ProviderKind,
+) -> Option<String> {
+    let tmux_name = {
+        let data = shared.core.lock().await;
+        data.sessions
+            .get(&channel_id)
+            .and_then(|s| s.channel_name.as_ref())
+            .map(|name| provider.build_tmux_session_name(name))
+    }?;
+
+    let hostname = std::process::Command::new("hostname")
+        .arg("-s")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    Some(format!("{}:{}", hostname, tmux_name))
+}
+
+async fn post_pcd_session_status(
+    session_key: Option<&str>,
+    status: &str,
+    provider: ProviderKind,
+    tokens: Option<u64>,
+) {
+    let Some(session_key) = session_key else {
+        return;
+    };
+
+    let mut body = serde_json::json!({
+        "session_key": session_key,
+        "status": status,
+        "provider": provider.as_str(),
+    });
+    if let Some(tokens) = tokens {
+        body["tokens"] = serde_json::json!(tokens);
+    }
+
+    let _ = reqwest::Client::new()
+        .post("http://127.0.0.1:8791/api/hook/session")
+        .json(&body)
+        .send()
         .await;
 }
 
@@ -526,6 +662,14 @@ async fn handle_event(
             let user_id = new_message.author.id;
             let user_name = &new_message.author.name;
             let channel_id = new_message.channel_id;
+            let is_dm = new_message.guild_id.is_none();
+            let (channel_name, _) = resolve_channel_category(ctx, channel_id).await;
+            if !data
+                .provider
+                .is_channel_supported(channel_name.as_deref(), is_dm)
+            {
+                return Ok(());
+            }
 
             // Auth check (allowed bots bypass auth)
             let is_allowed_bot = new_message.author.bot && {
@@ -977,7 +1121,7 @@ async fn cmd_start(
         drop(settings);
 
         // Rescan skills with project path to pick up project-level commands
-        let new_skills = scan_skills(Some(&canonical_path));
+        let new_skills = scan_skills(ctx.data().provider, Some(&canonical_path));
         *ctx.data().shared.skills_cache.write().await = new_skills;
     }
 
@@ -1512,10 +1656,12 @@ async fn cmd_silent(ctx: Context<'_>) -> Result<(), Error> {
 /// /help — Show help information
 #[poise::command(slash_command, rename = "help")]
 async fn cmd_help(ctx: Context<'_>) -> Result<(), Error> {
-    let help = "\
+    let provider_name = ctx.data().provider.display_name();
+    let help = format!(
+        "\
 **RemoteCC Discord Bot**
-Manage server files & chat with Claude AI.
-Each channel gets its own independent Claude Code session.
+Manage server files & chat with {}.
+Each channel gets its own independent {} session.
 
 **Session**
 `/start <path> [remote]` — Start session at directory
@@ -1533,7 +1679,7 @@ Send a file/photo — Upload to session directory
 `/shell <command>` — Run shell command (slash command)
 
 **AI Chat**
-Any other message is sent to Claude AI.
+Any other message is sent to {}.
 AI can read, edit, and run commands in your session.
 
 **Tool Management**
@@ -1542,7 +1688,7 @@ AI can read, edit, and run commands in your session.
 `/allowed -name` — Remove tool
 
 **Skills**
-`/cc <skill>` — Run a Claude Code skill (autocomplete)
+`/cc <skill>` — Run a provider skill (autocomplete)
 
 **Settings**
 `/debug` — Toggle debug logging
@@ -1552,7 +1698,9 @@ AI can read, edit, and run commands in your session.
 `/adduser @user` — Allow a user to use the bot
 `/removeuser @user` — Remove a user's access
 
-`/help` — Show this help";
+`/help` — Show this help",
+        provider_name, provider_name, provider_name
+    );
 
     ctx.say(help).await?;
     Ok(())
@@ -1576,7 +1724,7 @@ async fn autocomplete_skill<'a>(
         .collect()
 }
 
-/// /cc <skill> [args] — Run a Claude Code skill
+/// /cc <skill> [args] — Run a provider skill
 #[poise::command(slash_command, rename = "cc")]
 async fn cmd_cc(
     ctx: Context<'_>,
@@ -1731,17 +1879,34 @@ async fn cmd_cc(
         }
     }
 
-    // Build the prompt that tells Claude to invoke the skill
-    let skill_prompt = if args_str.is_empty() {
-        format!(
-            "Execute the skill `/{skill}` now. \
-             Use the Skill tool with skill=\"{skill}\"."
-        )
-    } else {
-        format!(
-            "Execute the skill `/{skill}` with arguments: {args_str}\n\
-             Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\"."
-        )
+    // Build the prompt that tells the active provider to invoke the skill
+    let skill_prompt = match ctx.data().provider {
+        ProviderKind::Claude => {
+            if args_str.is_empty() {
+                format!(
+                    "Execute the skill `/{skill}` now. \
+                     Use the Skill tool with skill=\"{skill}\"."
+                )
+            } else {
+                format!(
+                    "Execute the skill `/{skill}` with arguments: {args_str}\n\
+                     Use the Skill tool with skill=\"{skill}\", args=\"{args_str}\"."
+                )
+            }
+        }
+        ProviderKind::Codex => {
+            if args_str.is_empty() {
+                format!(
+                    "Use the local Codex skill `/{skill}` now. \
+                     Follow its SKILL.md instructions exactly and complete the task."
+                )
+            } else {
+                format!(
+                    "Use the local Codex skill `/{skill}` now with this user request: {args_str}\n\
+                     Follow its SKILL.md instructions exactly and adapt them to the request."
+                )
+            }
+        }
     };
 
     // Send a confirmation message that we can use as the "user message" for reactions
@@ -1786,6 +1951,12 @@ async fn cmd_meeting(
     let channel_id = ctx.channel_id();
     let agenda_str = agenda.as_deref().unwrap_or("");
     println!("  [{ts}] ◀ [{user_name}] /meeting {action} {agenda_str}");
+
+    if ctx.data().provider != ProviderKind::Claude {
+        ctx.say("`/meeting` is currently supported only on the Claude bot.")
+            .await?;
+        return Ok(());
+    }
 
     ctx.defer().await?;
 
@@ -1838,7 +2009,7 @@ async fn cmd_meeting(
 
 // ─── Text message → Claude AI ───────────────────────────────────────────────
 
-/// Handle regular text messages — send to Claude AI
+/// Handle regular text messages — send to the active provider.
 async fn handle_text_message(
     ctx: &serenity::Context,
     channel_id: ChannelId,
@@ -1850,7 +2021,7 @@ async fn handle_text_message(
     token: &str,
 ) -> Result<(), Error> {
     // Get session info, allowed tools, pending uploads, and pending steering notes
-    let (session_info, allowed_tools, pending_uploads, pending_interventions) = {
+    let (session_info, provider, allowed_tools, pending_uploads, pending_interventions) = {
         let mut data = shared.core.lock().await;
         let info = data.sessions.get(&channel_id).and_then(|session| {
             session.current_path.as_ref().map(|_| {
@@ -1872,8 +2043,14 @@ async fn handle_text_message(
             })
             .unwrap_or_default();
         drop(data);
-        let tools = shared.settings.read().await.allowed_tools.clone();
-        (info, tools, uploads, interventions)
+        let settings = shared.settings.read().await;
+        (
+            info,
+            settings.provider,
+            settings.allowed_tools.clone(),
+            uploads,
+            interventions,
+        )
     };
 
     let (session_id, current_path) = match session_info {
@@ -1947,10 +2124,16 @@ async fn handle_text_message(
                 .iter()
                 .map(|(name, desc)| format!("  - /{}: {}", name, desc))
                 .collect();
-            format!(
-                "\n\nAvailable skills (invoke via the Skill tool):\n{}",
-                list.join("\n")
-            )
+            match provider {
+                ProviderKind::Claude => format!(
+                    "\n\nAvailable skills (invoke via the Skill tool):\n{}",
+                    list.join("\n")
+                ),
+                ProviderKind::Codex => format!(
+                    "\n\nAvailable local Codex skills (use them by name when relevant):\n{}",
+                    list.join("\n")
+                ),
+            }
         }
     };
 
@@ -2062,8 +2245,10 @@ async fn handle_text_message(
         data.sessions
             .get(&channel_id)
             .and_then(|s| s.channel_name.as_ref())
-            .map(|name| claude::sanitize_tmux_session_name(name))
+            .map(|name| provider.build_tmux_session_name(name))
     };
+    let pcd_session_key = build_pcd_session_key(shared, channel_id, provider).await;
+    post_pcd_session_status(pcd_session_key.as_deref(), "working", provider, None).await;
 
     // Create channel for streaming
     let (tx, rx) = mpsc::channel();
@@ -2077,10 +2262,10 @@ async fn handle_text_message(
         watcher.paused.store(true, Ordering::Relaxed);
     }
 
-    // Run Claude in a blocking thread
+    // Run the provider in a blocking thread
     tokio::task::spawn_blocking(move || {
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            claude::execute_command_streaming(
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match provider {
+            ProviderKind::Claude => claude::execute_command_streaming(
                 &context_prompt,
                 session_id_clone.as_deref(),
                 &current_path_clone,
@@ -2090,7 +2275,18 @@ async fn handle_text_message(
                 Some(cancel_token_clone),
                 remote_profile.as_ref(),
                 tmux_session_name.as_deref(),
-            )
+            ),
+            ProviderKind::Codex => codex::execute_command_streaming(
+                &context_prompt,
+                session_id_clone.as_deref(),
+                &current_path_clone,
+                tx.clone(),
+                Some(&system_prompt_owned),
+                Some(&allowed_tools),
+                Some(cancel_token_clone),
+                remote_profile.as_ref(),
+                tmux_session_name.as_deref(),
+            ),
         }));
 
         match result {
@@ -2136,7 +2332,6 @@ async fn handle_text_message(
     let http = ctx.http.clone();
     let shared_owned = shared.clone();
     let user_text_owned = user_text.to_string();
-    let session_id_for_status = session_id.clone();
     tokio::spawn(async move {
         const SPINNER: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
         let mut full_response = String::new();
@@ -2384,38 +2579,14 @@ async fn handle_text_message(
             }
         }
 
-        // Report accumulated tokens to PCD for XP tracking
-        // Key matches hook: hostname:remoteCC-{channel_name}
-        if accumulated_tokens > 0 {
-            let tmux_name = {
-                let data = shared_owned.core.lock().await;
-                data.sessions
-                    .get(&channel_id)
-                    .and_then(|s| s.channel_name.as_ref())
-                    .map(|name| claude::sanitize_tmux_session_name(name))
-            };
-            if let Some(tmux_name) = tmux_name {
-                let hostname = std::process::Command::new("hostname")
-                    .arg("-s")
-                    .output()
-                    .ok()
-                    .and_then(|o| String::from_utf8(o.stdout).ok())
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_else(|| "unknown".to_string());
-                let session_key = format!("{}:{}", hostname, tmux_name);
-                let body = format!(
-                    r#"{{"session_key":"{}","status":"idle","tokens":{}}}"#,
-                    session_key.replace('\\', "\\\\").replace('"', "\\\""),
-                    accumulated_tokens
-                );
-                let _ = reqwest::Client::new()
-                    .post("http://127.0.0.1:8791/api/hook/session")
-                    .header("Content-Type", "application/json")
-                    .body(body)
-                    .send()
-                    .await;
-            }
-        }
+        // Report session presence and any accrued tokens to PCD.
+        post_pcd_session_status(
+            pcd_session_key.as_deref(),
+            "idle",
+            provider,
+            (accumulated_tokens > 0).then_some(accumulated_tokens),
+        )
+        .await;
 
         // Remove active token/owner and flush queued soft steering notes
         let queued_soft_count = {
@@ -2836,13 +3007,13 @@ async fn auto_restore_session(
     let (ch_name, cat_name) = resolve_channel_category(serenity_ctx, channel_id).await;
 
     // Read settings first to get last_sessions/last_remotes info
-    let (last_path, is_remote, saved_remote) = {
+    let (last_path, is_remote, saved_remote, provider) = {
         let settings = shared.settings.read().await;
         let channel_key = channel_id.get().to_string();
         let last_path = settings.last_sessions.get(&channel_key).cloned();
         let is_remote = settings.last_remotes.contains_key(&channel_key);
         let saved_remote = settings.last_remotes.get(&channel_key).cloned();
-        (last_path, is_remote, saved_remote)
+        (last_path, is_remote, saved_remote, settings.provider)
     };
 
     let mut data = shared.core.lock().await;
@@ -2879,7 +3050,7 @@ async fn auto_restore_session(
             }
             drop(data);
             // Rescan skills with project path
-            let new_skills = scan_skills(Some(&last_path));
+            let new_skills = scan_skills(provider, Some(&last_path));
             *shared.skills_cache.write().await = new_skills;
             let ts = chrono::Local::now().format("%H:%M:%S");
             let remote_info = saved_remote

@@ -1,9 +1,9 @@
 use std::fs;
 use std::sync::Arc;
 
+use poise::serenity_prelude as serenity;
 use rand::Rng;
 use serenity::{ChannelId, CreateMessage};
-use poise::serenity_prelude as serenity;
 
 use crate::services::claude;
 
@@ -325,17 +325,15 @@ pub(super) async fn cancel_meeting(
         let _ = channel_id
             .send_message(
                 http,
-                CreateMessage::new().content("🛑 **회의가 취소됐어.** 현재까지 트랜스크립트가 저장됐어."),
+                CreateMessage::new()
+                    .content("🛑 **회의가 취소됐어.** 현재까지 트랜스크립트가 저장됐어."),
             )
             .await;
         Ok(())
     } else {
         rate_limit_wait(shared, channel_id).await;
         let _ = channel_id
-            .send_message(
-                http,
-                CreateMessage::new().content("진행 중인 회의가 없어."),
-            )
+            .send_message(http, CreateMessage::new().content("진행 중인 회의가 없어."))
             .await;
         Ok(())
     }
@@ -383,10 +381,7 @@ pub(super) async fn meeting_status(
         }
         None => {
             let _ = channel_id
-                .send_message(
-                    http,
-                    CreateMessage::new().content("진행 중인 회의가 없어."),
-                )
+                .send_message(http, CreateMessage::new().content("진행 중인 회의가 없어."))
                 .await;
         }
     }
@@ -535,10 +530,8 @@ async fn run_meeting_round(
                 let _ = channel_id
                     .send_message(
                         http,
-                        CreateMessage::new().content(format!(
-                            "⚠️ {} 발언 실패: {}",
-                            participant.display_name, e
-                        )),
+                        CreateMessage::new()
+                            .content(format!("⚠️ {} 발언 실패: {}", participant.display_name, e)),
                     )
                     .await;
             }
@@ -667,7 +660,11 @@ async fn conclude_meeting(
             .get(&channel_id)
             .ok_or("Meeting not found")?;
         let t = format_transcript(&m.transcript);
-        let p: Vec<String> = m.participants.iter().map(|p| p.display_name.clone()).collect();
+        let p: Vec<String> = m
+            .participants
+            .iter()
+            .map(|p| p.display_name.clone())
+            .collect();
         (m.agenda.clone(), t, p.join(", "))
     };
 
@@ -753,8 +750,7 @@ async fn conclude_meeting(
             let _ = channel_id
                 .send_message(
                     http,
-                    CreateMessage::new()
-                        .content(format!("⚠️ 회의록 작성 실패: {}", e)),
+                    CreateMessage::new().content(format!("⚠️ 회의록 작성 실패: {}", e)),
                 )
                 .await;
             None
@@ -764,8 +760,7 @@ async fn conclude_meeting(
             let _ = channel_id
                 .send_message(
                     http,
-                    CreateMessage::new()
-                        .content(format!("⚠️ 회의록 작성 실패: {}", e)),
+                    CreateMessage::new().content(format!("⚠️ 회의록 작성 실패: {}", e)),
                 )
                 .await;
             None
@@ -785,10 +780,7 @@ async fn conclude_meeting(
 }
 
 /// Save meeting record as Obsidian Markdown to CookingHeart/meetings/
-async fn save_meeting_record(
-    shared: &Arc<SharedData>,
-    channel_id: ChannelId,
-) -> Result<(), Error> {
+async fn save_meeting_record(shared: &Arc<SharedData>, channel_id: ChannelId) -> Result<(), Error> {
     let (md, meeting_id, pcd_payload) = {
         let core = shared.core.lock().await;
         let m = core
@@ -829,7 +821,11 @@ fn build_pcd_payload(m: &Meeting) -> Option<serde_json::Value> {
         _ => "in_progress",
     };
 
-    let participant_names: Vec<&str> = m.participants.iter().map(|p| p.display_name.as_str()).collect();
+    let participant_names: Vec<&str> = m
+        .participants
+        .iter()
+        .map(|p| p.display_name.as_str())
+        .collect();
 
     let entries: Vec<serde_json::Value> = m
         .transcript
@@ -865,7 +861,9 @@ fn build_pcd_payload(m: &Meeting) -> Option<serde_json::Value> {
 }
 
 /// POST meeting data to PCD server
-async fn post_meeting_to_pcd(payload: serde_json::Value) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+async fn post_meeting_to_pcd(
+    payload: serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
         .build()?;

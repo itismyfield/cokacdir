@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use poise::serenity_prelude as serenity;
 
 use crate::services::claude::DEFAULT_ALLOWED_TOOLS;
+use crate::services::provider::ProviderKind;
 
 use super::formatting::normalize_allowed_tools;
 use super::DiscordBotSettings;
@@ -35,6 +36,13 @@ pub(super) fn role_map_path() -> Option<std::path::PathBuf> {
 pub(super) struct RoleBinding {
     pub role_id: String,
     pub prompt_file: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DiscordBotLaunchConfig {
+    pub hash_key: String,
+    pub token: String,
+    pub provider: ProviderKind,
 }
 
 pub(super) fn parse_role_binding(v: &serde_json::Value) -> Option<RoleBinding> {
@@ -170,6 +178,11 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         return DiscordBotSettings::default();
     };
     let owner_user_id = entry.get("owner_user_id").and_then(|v| v.as_u64());
+    let provider = entry
+        .get("provider")
+        .and_then(|v| v.as_str())
+        .and_then(ProviderKind::from_str)
+        .unwrap_or(ProviderKind::Claude);
     let last_sessions = entry
         .get("last_sessions")
         .and_then(|v| v.as_object())
@@ -206,6 +219,7 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         Some(value) => {
             let Some(tools_arr) = value.as_array() else {
                 return DiscordBotSettings {
+                    provider,
                     owner_user_id,
                     last_sessions,
                     last_remotes,
@@ -218,6 +232,7 @@ pub(super) fn load_bot_settings(token: &str) -> DiscordBotSettings {
         }
     };
     DiscordBotSettings {
+        provider,
         allowed_tools,
         last_sessions,
         last_remotes,
@@ -244,6 +259,7 @@ pub(super) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
     let normalized_tools = normalize_allowed_tools(&settings.allowed_tools);
     let mut entry = serde_json::json!({
         "token": token,
+        "provider": settings.provider.as_str(),
         "allowed_tools": normalized_tools,
         "last_sessions": settings.last_sessions,
         "last_remotes": settings.last_remotes,
@@ -259,6 +275,39 @@ pub(super) fn save_bot_settings(token: &str, settings: &DiscordBotSettings) {
     }
 }
 
+pub fn load_discord_bot_launch_configs() -> Vec<DiscordBotLaunchConfig> {
+    let Some(path) = bot_settings_path() else {
+        return Vec::new();
+    };
+    let Ok(content) = fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return Vec::new();
+    };
+    let Some(obj) = json.as_object() else {
+        return Vec::new();
+    };
+
+    let mut configs = Vec::new();
+    for (hash_key, entry) in obj {
+        let Some(token) = entry.get("token").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let provider = entry
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .and_then(ProviderKind::from_str)
+            .unwrap_or(ProviderKind::Claude);
+        configs.push(DiscordBotLaunchConfig {
+            hash_key: hash_key.clone(),
+            token: token.to_string(),
+            provider,
+        });
+    }
+    configs
+}
+
 /// Resolve a Discord bot token from its hash by searching bot_settings.json
 pub fn resolve_discord_token_by_hash(hash: &str) -> Option<String> {
     let path = bot_settings_path()?;
@@ -272,6 +321,10 @@ pub fn resolve_discord_token_by_hash(hash: &str) -> Option<String> {
         .map(String::from)
 }
 
+pub fn resolve_discord_bot_provider(token: &str) -> ProviderKind {
+    load_bot_settings(token).provider
+}
+
 #[cfg(test)]
 mod tests {
     use std::fs;
@@ -279,7 +332,9 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{discord_token_hash, load_bot_settings};
+    use crate::services::provider::ProviderKind;
+
+    use super::{discord_token_hash, load_bot_settings, load_discord_bot_launch_configs};
 
     fn env_lock() -> &'static Mutex<()> {
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -325,6 +380,7 @@ mod tests {
 
             let settings = load_bot_settings(token);
             assert!(settings.allowed_tools.is_empty());
+            assert_eq!(settings.provider, ProviderKind::Claude);
             assert_eq!(settings.owner_user_id, Some(42));
             assert_eq!(settings.allowed_user_ids, vec![7]);
             assert_eq!(settings.allowed_bot_ids, vec![9]);
@@ -355,6 +411,28 @@ mod tests {
                 settings.allowed_tools,
                 vec!["WebFetch".to_string(), "Bash".to_string()]
             );
+        });
+    }
+
+    #[test]
+    fn test_load_bot_launch_configs_reads_provider() {
+        with_temp_home(|temp_home| {
+            let settings_dir = temp_home.path().join(".remotecc");
+            fs::create_dir_all(&settings_dir).unwrap();
+            fs::write(
+                settings_dir.join("bot_settings.json"),
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "discord_a": { "token": "claude-token", "provider": "claude" },
+                    "discord_b": { "token": "codex-token", "provider": "codex" }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+
+            let configs = load_discord_bot_launch_configs();
+            assert_eq!(configs.len(), 2);
+            assert_eq!(configs[0].provider, ProviderKind::Claude);
+            assert_eq!(configs[1].provider, ProviderKind::Codex);
         });
     }
 }

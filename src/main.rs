@@ -41,13 +41,17 @@ fn print_help() {
     println!("    --prompt <TEXT>         Send prompt to AI and print rendered response");
     println!("    --design                Enable theme hot-reload (for theme development)");
     println!("    --base64 <TEXT>         Decode base64 and print (internal use)");
-    println!("    --dcserver [TOKEN]      Start Discord bot server (or set REMOTECC_TOKEN env)");
-    println!("    --restart-dcserver       Restart Discord bot (reads token from bot_settings.json)");
+    println!("    --dcserver [TOKEN]      Start Discord bot server(s); without TOKEN uses bot_settings.json");
+    println!(
+        "    --restart-dcserver      Restart Discord bot tmux session (reads bot_settings.json)"
+    );
     println!("    --discord-sendfile <PATH> --channel <ID> --key <HASH>");
     println!(
         "                            Send file via Discord bot (internal use, HASH = token hash)"
     );
-    println!("    --reset-tmux             Kill all remoteCC-* tmux sessions (local + remote profiles)");
+    println!(
+        "    --reset-tmux             Kill all remoteCC-* tmux sessions (local + remote profiles)"
+    );
     println!("    --ismcptool <TOOL>...    Check if MCP tool(s) are registered in .claude/settings.json (CWD)");
     println!(
         "    --addmcptool <TOOL>...   Add MCP tool permission(s) to .claude/settings.json (CWD)"
@@ -235,7 +239,11 @@ fn clean_remotecc_tmp_files() -> usize {
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
-            if name_str.starts_with("remotecc-") && (name_str.ends_with(".jsonl") || name_str.ends_with(".input") || name_str.ends_with(".prompt")) {
+            if name_str.starts_with("remotecc-")
+                && (name_str.ends_with(".jsonl")
+                    || name_str.ends_with(".input")
+                    || name_str.ends_with(".prompt"))
+            {
                 if std::fs::remove_file(entry.path()).is_ok() {
                     count += 1;
                 }
@@ -251,9 +259,12 @@ fn kill_remotecc_tmux_sessions_remote(profile: &services::remote::RemoteProfile)
     );
 
     let mut cmd = std::process::Command::new("ssh");
-    cmd.arg("-o").arg("ConnectTimeout=5")
-        .arg("-o").arg("StrictHostKeyChecking=no")
-        .arg("-p").arg(profile.port.to_string())
+    cmd.arg("-o")
+        .arg("ConnectTimeout=5")
+        .arg("-o")
+        .arg("StrictHostKeyChecking=no")
+        .arg("-p")
+        .arg(profile.port.to_string())
         .arg(format!("{}@{}", profile.user, profile.host))
         .arg(&ssh_cmd);
 
@@ -284,52 +295,30 @@ fn kill_remotecc_tmux_sessions_remote(profile: &services::remote::RemoteProfile)
 }
 
 fn handle_restart_dcserver() {
-    use services::discord::resolve_discord_token_by_hash;
+    use services::discord::load_discord_bot_launch_configs;
 
     // Read bot_settings.json to find stored token(s)
     let settings_path = dirs::home_dir()
         .map(|h| h.join(".remotecc").join("bot_settings.json"))
         .expect("Cannot determine home directory");
 
-    let content = match std::fs::read_to_string(&settings_path) {
-        Ok(c) => c,
+    match std::fs::read_to_string(&settings_path) {
+        Ok(_) => {}
         Err(_) => {
             eprintln!("Error: ~/.remotecc/bot_settings.json not found.");
-            eprintln!("Run 'remotecc --dcserver <TOKEN>' at least once first.");
+            eprintln!("Run 'remotecc --dcserver' after configuring bot_settings.json.");
             return;
         }
-    };
-    let json: serde_json::Value = match serde_json::from_str(&content) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("Error parsing bot_settings.json: {}", e);
-            return;
-        }
-    };
+    }
 
-    // Find first hash key with a token
-    let obj = match json.as_object() {
-        Some(o) => o,
-        None => {
-            eprintln!("Error: bot_settings.json is not a JSON object");
-            return;
-        }
-    };
-
-    let (hash_key, token) = match obj.iter().find_map(|(k, v)| {
-        v.get("token")
-            .and_then(|t| t.as_str())
-            .map(|t| (k.clone(), t.to_string()))
-    }) {
-        Some(pair) => pair,
-        None => {
-            eprintln!("Error: no token found in bot_settings.json");
-            return;
-        }
-    };
+    let configs = load_discord_bot_launch_configs();
+    if configs.is_empty() {
+        eprintln!("Error: no bot tokens found in bot_settings.json");
+        return;
+    }
 
     println!("🔄 Restarting Discord bot server...");
-    println!("   Token key: {}", hash_key);
+    println!("   Configured bots: {}", configs.len());
 
     // Kill existing dcserver processes (match any binary name with --dcserver arg)
     let pgrep_output = std::process::Command::new("pgrep")
@@ -387,11 +376,7 @@ fn handle_restart_dcserver() {
         }
     };
 
-    let script = format!(
-        "#!/bin/bash\nexport REMOTECC_TOKEN='{}'\nunset CLAUDECODE\nexec {} --dcserver\n",
-        token.replace('\'', "'\\''"),
-        exe
-    );
+    let script = format!("#!/bin/bash\nunset CLAUDECODE\nexec {} --dcserver\n", exe);
     std::fs::write(&launcher_path, &script).expect("Failed to write launcher script");
     #[cfg(unix)]
     {
@@ -409,12 +394,14 @@ fn handle_restart_dcserver() {
     std::thread::sleep(std::time::Duration::from_millis(500));
 
     let child = std::process::Command::new("tmux")
-        .args(["new-session", "-d", "-s", tmux_session, launcher_path.to_str().unwrap()])
+        .args([
+            "new-session",
+            "-d",
+            "-s",
+            tmux_session,
+            launcher_path.to_str().unwrap(),
+        ])
         .spawn();
-
-    // Clean up launcher script after tmux reads it
-    std::thread::sleep(std::time::Duration::from_secs(1));
-    let _ = std::fs::remove_file(&launcher_path);
 
     match child {
         Ok(_) => {
@@ -425,7 +412,10 @@ fn handle_restart_dcserver() {
             if check.map(|s| s.success()).unwrap_or(false) {
                 println!("✅ Discord bot started in tmux session '{}'", tmux_session);
             } else {
-                eprintln!("❌ tmux session '{}' failed to start. Check with: tmux a -t {}", tmux_session, tmux_session);
+                eprintln!(
+                    "❌ tmux session '{}' failed to start. Check with: tmux a -t {}",
+                    tmux_session, tmux_session
+                );
             }
         }
         Err(e) => {
@@ -434,7 +424,7 @@ fn handle_restart_dcserver() {
     }
 }
 
-fn handle_dcserver(token: String) {
+fn handle_dcserver(token: Option<String>) {
     // Prevent CLAUDECODE from leaking into child tmux sessions
     std::env::remove_var("CLAUDECODE");
 
@@ -451,7 +441,39 @@ fn handle_dcserver(token: String) {
 
     rt.block_on(async {
         println!();
-        services::discord::run_bot(&token).await;
+        match token {
+            Some(token) => {
+                let provider = services::discord::resolve_discord_bot_provider(&token);
+                services::discord::run_bot(&token, provider).await;
+            }
+            None => {
+                let configs = services::discord::load_discord_bot_launch_configs();
+                if configs.is_empty() {
+                    eprintln!("Error: no bot tokens found in ~/.remotecc/bot_settings.json");
+                    return;
+                }
+
+                println!(
+                    "  ▸ Providers : {}",
+                    configs
+                        .iter()
+                        .map(|cfg| cfg.provider.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+
+                let mut tasks = Vec::new();
+                for config in configs {
+                    tasks.push(tokio::spawn(async move {
+                        services::discord::run_bot(&config.token, config.provider).await;
+                    }));
+                }
+
+                for task in tasks {
+                    let _ = task.await;
+                }
+            }
+        }
     });
 }
 
@@ -606,14 +628,12 @@ fn main() -> io::Result<()> {
                 return Ok(());
             }
             "--dcserver" => {
-                let token = if i + 1 < args.len() {
-                    args[i + 1].clone()
+                let token = if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    Some(args[i + 1].clone())
                 } else if let Ok(t) = std::env::var("REMOTECC_TOKEN") {
-                    t
+                    Some(t)
                 } else {
-                    eprintln!("Error: --dcserver requires a token (argument or REMOTECC_TOKEN env)");
-                    eprintln!("Usage: remotecc --dcserver <TOKEN>");
-                    return Ok(());
+                    None
                 };
                 handle_dcserver(token);
                 return Ok(());
@@ -749,6 +769,51 @@ fn main() -> io::Result<()> {
                     }
                     _ => {
                         eprintln!("Error: --tmux-wrapper requires --output-file, --input-fifo, and --prompt-file");
+                    }
+                }
+                return Ok(());
+            }
+            "--codex-tmux-wrapper" => {
+                let mut output_file: Option<String> = None;
+                let mut input_fifo: Option<String> = None;
+                let mut prompt_file: Option<String> = None;
+                let mut cwd: Option<String> = None;
+                let mut codex_bin: Option<String> = None;
+                let mut j = i + 1;
+                while j < args.len() {
+                    match args[j].as_str() {
+                        "--output-file" => {
+                            output_file = args.get(j + 1).cloned();
+                            j += 2;
+                        }
+                        "--input-fifo" => {
+                            input_fifo = args.get(j + 1).cloned();
+                            j += 2;
+                        }
+                        "--prompt-file" => {
+                            prompt_file = args.get(j + 1).cloned();
+                            j += 2;
+                        }
+                        "--cwd" => {
+                            cwd = args.get(j + 1).cloned();
+                            j += 2;
+                        }
+                        "--codex-bin" => {
+                            codex_bin = args.get(j + 1).cloned();
+                            j += 2;
+                        }
+                        _ => {
+                            j += 1;
+                        }
+                    }
+                }
+                match (output_file, input_fifo, prompt_file, codex_bin) {
+                    (Some(of), Some(inf), Some(pf), Some(bin)) => {
+                        let wd = cwd.unwrap_or_else(|| ".".to_string());
+                        services::codex_tmux_wrapper::run(&of, &inf, &pf, &wd, &bin);
+                    }
+                    _ => {
+                        eprintln!("Error: --codex-tmux-wrapper requires --output-file, --input-fifo, --prompt-file, and --codex-bin");
                     }
                 }
                 return Ok(());
